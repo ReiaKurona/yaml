@@ -58,7 +58,7 @@ module.exports = async (req, res) => {
             { name: "Sora&ChatGPT", type: "select", proxies: ["🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载", "ReiaNEXT"] },
             { name: "ABEMA", type: "select", proxies: ["🇯🇵 日本 自动负载", "ReiaNEXT"] },
             { name: "赛马娘PrettyDerby", type: "select", proxies: ["🇯🇵 日本 自动负载", "ReiaNEXT"] },
-            { name: "PJSK-JP", type: "select", proxies: ["🇯🇵 日本 自动负载", "🇭🇰 香港 自动负载","ReiaNEXT"] },
+            { name: "PJSK-JP", type: "select", proxies: ["🇯🇵 日本 自动负载","ReiaNEXT"] },
             { name: "Claude", type: "select", proxies: ["🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载", "ReiaNEXT"] },
             
             // 自动测速与故障转移 (包含所有节点)
