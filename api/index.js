@@ -55,11 +55,11 @@ module.exports = async (req, res) => {
             { name: "ReiaNEXT", type: "select", proxies: ["♻️ 自动选择", "🇭🇰 香港 自动负载", "🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载", "🚫 故障转移"] },
             
             // 应用分流组
-            { name: "Sora&ChatGPT", type: "select", proxies: ["🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载", "🚀 节点选择"] },
-            { name: "ABEMA", type: "select", proxies: ["🇯🇵 日本 自动负载", "🚀 节点选择"] },
-            { name: "赛马娘PrettyDerby", type: "select", proxies: ["🇯🇵 日本 自动负载", "🚀 节点选择"] },
-            { name: "PJSK-JP", type: "select", proxies: ["🇯🇵 日本 自动负载", "🚀 节点选择"] },
-            { name: "Claude", type: "select", proxies: ["🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载", "🚀 节点选择"] },
+            { name: "Sora&ChatGPT", type: "select", proxies: ["🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载", "ReiaNEXT"] },
+            { name: "ABEMA", type: "select", proxies: ["🇯🇵 日本 自动负载", "ReiaNEXT"] },
+            { name: "赛马娘PrettyDerby", type: "select", proxies: ["🇯🇵 日本 自动负载", "ReiaNEXT"] },
+            { name: "PJSK-JP", type: "select", proxies: ["🇯🇵 日本 自动负载", "🇭🇰 香港 自动负载","ReiaNEXT"] },
+            { name: "Claude", type: "select", proxies: ["🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载", "ReiaNEXT"] },
             
             // 自动测速与故障转移 (包含所有节点)
             { name: "♻️ 自动选择", type: "url-test", proxies: allProxyNames, url: "http://www.gstatic.com/generate_204", interval: 86400 },
