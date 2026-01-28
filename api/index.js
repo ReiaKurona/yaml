@@ -45,14 +45,14 @@ module.exports = async (req, res) => {
             return matched.length > 0 ? matched : ["DIRECT"];
         };
 
-        const hkNodes = getNodes(/HK|hong|🇭🇰|/i);
+        const hkNodes = getNodes(/HK|hong|🇭🇰/i);
         const jpNodes = getNodes(/JP|japan|🇯🇵/i);
         const caNodes = getNodes(/CA|canada|🇨🇦/i);
 
         // 5. 严格按照你要求的模板重新定义策略组
         const MY_GROUPS = [
             // 主选择组
-            { name: "🚀 节点选择", type: "select", proxies: ["♻️ 自动选择", "🇭🇰 香港 自动负载", "🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载", "🚫 故障转移"] },
+            { name: "ReiaNEXT", type: "select", proxies: ["♻️ 自动选择", "🇭🇰 香港 自动负载", "🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载", "🚫 故障转移"] },
             
             // 应用分流组
             { name: "Sora&ChatGPT", type: "select", proxies: ["🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载", "🚀 节点选择"] },
