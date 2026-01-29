@@ -68,15 +68,15 @@ module.exports = async (req, res) => {
             // 负载均衡组 (核心：轮询模式)
             { 
                 name: "🇭🇰 香港 自动负载", type: "load-balance", proxies: hkNodes, 
-                url: "http://www.gstatic.com/generate_204", interval: 300, strategy: "round-robin" 
+                url: "http://www.gstatic.com/generate_204", interval: 120, strategy: "round-robin" 
             },
             { 
                 name: "🇯🇵 日本 自动负载", type: "load-balance", proxies: jpNodes, 
-                url: "http://www.gstatic.com/generate_204", interval: 300, strategy: "round-robin" 
+                url: "http://www.gstatic.com/generate_204", interval: 120, strategy: "round-robin" 
             },
             { 
                 name: "🇨🇦 加拿大 自动负载", type: "load-balance", proxies: caNodes, 
-                url: "http://www.gstatic.com/generate_204", interval: 300, strategy: "round-robin" 
+                url: "http://www.gstatic.com/generate_204", interval: 120, strategy: "round-robin" 
             }
         ];
 
