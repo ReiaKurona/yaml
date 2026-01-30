@@ -7,7 +7,7 @@ module.exports = async (req, res) => {
     const ua = req.headers['user-agent'] || '';
 
     if (!subUrl) {
-        return res.status(400).send('使用方法: https://xurl.reia.fans/?url=原始订阅链接');
+        return res.status(400).send('欢迎使用NextReia的自动静默订阅覆写API服务！请遵循此正确的使用方法: https://xurl.reia.fans/?url=原始订阅链接。一般情况下无需单独调用，直接在面板复制订阅链接即可自动调用API');
     }
 
     try {
