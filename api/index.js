@@ -7,7 +7,7 @@ module.exports = async (req, res) => {
     const ua = req.headers['user-agent'] || '';
 
     if (!subUrl) {
-        return res.status(400).send('使用方法: https://你的域名/?url=原始订阅链接');
+        return res.status(400).send('使用方法: https://xurl.reia.fans/?url=原始订阅链接');
     }
 
     try {
