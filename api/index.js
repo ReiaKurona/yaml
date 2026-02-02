@@ -2,15 +2,15 @@ const yaml = require('js-yaml');
 const axios = require('axios');
 const { kv } = require('@vercel/kv');
 
-// 管理员登录密码（请在 Vercel 环境变量中设置 ADMIN_PASSWORD，或直接修改下面这行）
+// 管理员登录密码
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin888"; 
 
-// 默认配置（当数据库为空时使用）
+// 1. 修正后的默认配置 (注意：name 加上了国旗，与下方的引用保持一致)
 const DEFAULT_CONFIG = {
     lbGroups: [
-        { name: "香港", regex: "HK|hong|🇭🇰" },
-        { name: "日本", regex: "JP|japan|🇯🇵" },
-        { name: "加拿大", regex: "CA|canada|🇨🇦" }
+        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰|IEPL" },
+        { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
+        { name: "🇨🇦 加拿大", regex: "CA|canada|🇨🇦" }
     ],
     appGroups: {
         "Sora&ChatGPT": ["🇯🇵 日本 自动负载", "🇨🇦 加拿大 自动负载"],
@@ -27,19 +27,24 @@ module.exports = async (req, res) => {
     const ua = req.headers['user-agent'] || '';
 
     // -----------------------------------------------------------------------
-    // A. 管理后台逻辑 (保存配置)
+    // A. 管理后台逻辑
     // -----------------------------------------------------------------------
-    if (req.method === 'POST' && action === 'saveConfig') {
+    if (req.method === 'POST') {
         const { auth, newConfig } = req.body;
         if (auth !== ADMIN_PASSWORD) return res.status(403).json({ msg: "密码错误" });
+
+        if (action === 'saveConfig') {
+            await kv.set('global_config', newConfig);
+            return res.json({ msg: "✅ 配置已保存，请在客户端刷新订阅！" });
+        }
         
-        await kv.set('global_config', newConfig);
-        return res.json({ msg: "配置已全局保存，用户订阅将立即生效" });
+        // 新增：重置功能
+        if (action === 'resetConfig') {
+            await kv.del('global_config');
+            return res.json({ msg: "🔄 已重置为默认配置，请刷新页面查看。" });
+        }
     }
 
-    // -----------------------------------------------------------------------
-    // B. 管理后台逻辑 (展示界面)
-    // -----------------------------------------------------------------------
     if (!subUrl) {
         const savedConfig = await kv.get('global_config');
         const currentConfig = savedConfig || DEFAULT_CONFIG;
@@ -48,11 +53,11 @@ module.exports = async (req, res) => {
     }
 
     // -----------------------------------------------------------------------
-    // C. 订阅覆写逻辑 (用户访问)
+    // B. 订阅处理逻辑
     // -----------------------------------------------------------------------
     try {
-        // 从数据库读取全局配置
         const savedConfig = await kv.get('global_config');
+        // 如果数据库里有配置就用数据库的，否则用默认修复版
         const userConfig = savedConfig || DEFAULT_CONFIG;
 
         const isClash = /clash|mihomo|stash/i.test(ua);
@@ -62,20 +67,19 @@ module.exports = async (req, res) => {
             timeout: 10000
         });
 
-        // 非 Clash 转发
         if (!isClash) {
             res.setHeader('Content-Type', 'text/plain; charset=utf-8');
             if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
             return res.send(response.data);
         }
 
-        // Clash 修改逻辑
         let config = yaml.load(response.data);
         const allProxyNames = (config.proxies || []).map(p => p.name);
 
         const usedNodeNames = new Set();
         const lbGroupsOutput = [];
 
+        // 核心修复：确保生成的组名与引用一致
         userConfig.lbGroups.forEach(group => {
             const regex = new RegExp(group.regex, 'i');
             const matched = allProxyNames.filter(name => {
@@ -83,10 +87,12 @@ module.exports = async (req, res) => {
                 if (m) usedNodeNames.add(name);
                 return m;
             });
+
+            // 这里的 name 会变成 "🇯🇵 日本 自动负载"
             lbGroupsOutput.push({
-                name: `${group.name} 自动负载`,
+                name: `${group.name} 自动负载`, 
                 type: "load-balance",
-                proxies: matched.length > 0 ? matched : ["DIRECT"],
+                proxies: matched.length > 0 ? matched : ["DIRECT"], // 防止为空时报错
                 url: "http://www.gstatic.com/generate_204",
                 interval: 120,
                 strategy: "round-robin"
@@ -121,7 +127,6 @@ module.exports = async (req, res) => {
     }
 };
 
-// 后台 HTML 模板
 function renderAdminPage(config) {
     return `
 <!DOCTYPE html>
@@ -129,29 +134,32 @@ function renderAdminPage(config) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NextReia 全局后台</title>
+    <title>NextReia 管理后台</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>body{background:#f4f7f6;padding:20px} .card{margin-bottom:20px}</style>
 </head>
 <body>
 <div class="container" style="max-width:800px">
-    <h3 class="mb-4">🛠️ 订阅全局管理后台</h3>
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h3>🛠️ NextReia 全局后台</h3>
+        <button class="btn btn-outline-danger btn-sm" onclick="resetConfig()">⚠️ 重置为默认配置</button>
+    </div>
     
     <div class="card">
         <div class="card-header bg-dark text-white">身份验证</div>
         <div class="card-body">
-            <input type="password" id="admin_pwd" class="form-control" placeholder="输入管理员密码">
+            <input type="password" id="admin_pwd" class="form-control" placeholder="输入管理员密码 (默认 admin888)">
         </div>
     </div>
 
     <div class="card">
-        <div class="card-header">负载均衡组设置 (Regex)</div>
+        <div class="card-header">负载均衡组 (名称需包含国旗，如: 🇯🇵 日本)</div>
         <div class="card-body" id="lb_area"></div>
         <div class="card-footer"><button class="btn btn-sm btn-secondary" onclick="addLB()">+ 增加地区</button></div>
     </div>
 
     <div class="card">
-        <div class="card-header">未匹配节点设置</div>
+        <div class="card-header">设置</div>
         <div class="card-body">
             <div class="form-check form-switch">
                 <input class="form-check-input" type="checkbox" id="unmatched" ${config.includeUnmatched ? 'checked' : ''}>
@@ -161,16 +169,17 @@ function renderAdminPage(config) {
     </div>
 
     <button class="btn btn-primary w-100 p-3" onclick="save()">保存全局设置</button>
-    <p class="text-muted mt-3 small">* 保存后，所有使用 <code>?url=...</code> 的用户将自动应用新规则，无需更改链接。</p>
 </div>
 
 <script>
     let currentConfig = ${JSON.stringify(config)};
+    
+    // 渲染负载组
     function addLB(val = {name:'', regex:''}) {
         const div = document.createElement('div');
         div.className = 'input-group mb-2';
-        div.innerHTML = \`<input type="text" class="form-control lb-n" placeholder="地区" value="\${val.name}">
-                          <input type="text" class="form-control lb-r" placeholder="正则" value="\${val.regex}">
+        div.innerHTML = \`<input type="text" class="form-control lb-n" placeholder="名称(如: 🇯🇵 日本)" value="\${val.name}">
+                          <input type="text" class="form-control lb-r" placeholder="正则(如: JP|Japan)" value="\${val.regex}">
                           <button class="btn btn-danger" onclick="this.parentElement.remove()">删</button>\`;
         document.getElementById('lb_area').appendChild(div);
     }
@@ -182,7 +191,7 @@ function renderAdminPage(config) {
                 name: el.querySelector('.lb-n').value,
                 regex: el.querySelector('.lb-r').value
             })).filter(i => i.name),
-            appGroups: currentConfig.appGroups,
+            appGroups: currentConfig.appGroups, // 保持默认的分流组引用
             includeUnmatched: document.getElementById('unmatched').checked
         };
         const auth = document.getElementById('admin_pwd').value;
@@ -191,8 +200,23 @@ function renderAdminPage(config) {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ auth, newConfig })
         });
+        if(resp.status === 403) return alert("密码错误");
         const res = await resp.json();
         alert(res.msg);
+    }
+
+    async function resetConfig() {
+        if(!confirm("确定要重置所有配置为默认状态吗？这将修复名称不匹配的问题。")) return;
+        const auth = document.getElementById('admin_pwd').value;
+        const resp = await fetch('/?action=resetConfig', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ auth })
+        });
+        if(resp.status === 403) return alert("密码错误");
+        const res = await resp.json();
+        alert(res.msg);
+        location.reload();
     }
 </script>
 </body>
