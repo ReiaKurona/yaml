@@ -7,13 +7,11 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "tcs154829";
 
 // 默认配置
 const DEFAULT_CONFIG = {
-    // 1. 负载均衡组定义
     lbGroups: [
         { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰" },
         { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
         { name: "🇨🇦 加拿大", regex: "CA|canada|🇨🇦" }
     ],
-    // 2. 应用分流默认指向 (仅包含国旗前缀的名称，脚本会自动补全 " 自动负载")
     appGroups: {
         "Sora&ChatGPT": ["🇯🇵 日本", "🇨🇦 加拿大", "🇺🇸 美国", "🇹🇼 台湾", "🇸🇬 新加坡"], 
         "ABEMA": ["🇯🇵 日本"],
@@ -21,18 +19,15 @@ const DEFAULT_CONFIG = {
         "PJSK-JP": ["🇯🇵 日本"],
         "Claude": ["🇯🇵 日本", "🇨🇦 加拿大", "🇺🇸 美国", "🇬🇧 英国"]
     },
-    // 3. 高级设置
     includeUnmatched: true,
-    healthCheckInterval: 120 // 默认 120 秒
+    healthCheckInterval: 120
 };
 
 module.exports = async (req, res) => {
     const { url: subUrl, action } = req.query;
     const ua = req.headers['user-agent'] || '';
 
-    // -----------------------------------------------------------------------
-    // A. 管理后台 API
-    // -----------------------------------------------------------------------
+    // A. API 接口
     if (req.method === 'POST') {
         const { auth, newConfig } = req.body;
 
@@ -40,28 +35,21 @@ module.exports = async (req, res) => {
             if (auth === ADMIN_PASSWORD) return res.json({ success: true });
             return res.status(403).json({ success: false, msg: "密码错误" });
         }
-
         if (auth !== ADMIN_PASSWORD) return res.status(403).json({ msg: "会话失效" });
-
         if (action === 'saveConfig') {
             await kv.set('global_config', newConfig);
             return res.json({ msg: "✅ 全局配置已保存！" });
         }
-        
         if (action === 'resetConfig') {
             await kv.del('global_config');
             return res.json({ msg: "🔄 已重置为默认配置。" });
         }
     }
 
-    // -----------------------------------------------------------------------
-    // B. 返回 Web 管理界面
-    // -----------------------------------------------------------------------
+    // B. 返回 Web 界面
     if (!subUrl) {
         const savedConfig = await kv.get('global_config');
-        // 合并默认配置，防止新字段(如interval)缺失导致报错
         const currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
-        // 确保 appGroups 存在 (兼容旧数据)
         if (!currentConfig.appGroups) currentConfig.appGroups = DEFAULT_CONFIG.appGroups;
         if (!currentConfig.healthCheckInterval) currentConfig.healthCheckInterval = 120;
 
@@ -69,14 +57,10 @@ module.exports = async (req, res) => {
         return res.send(renderAdminPage(currentConfig));
     }
 
-    // -----------------------------------------------------------------------
     // C. 订阅生成逻辑
-    // -----------------------------------------------------------------------
     try {
         const savedConfig = await kv.get('global_config');
         const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
-        
-        // 确保关键参数存在
         const intervalTime = userConfig.healthCheckInterval || 120;
 
         const isClash = /clash|mihomo|stash/i.test(ua);
@@ -98,7 +82,6 @@ module.exports = async (req, res) => {
         const usedNodeNames = new Set();
         const lbGroupsOutput = [];
 
-        // 1. 生成负载均衡组
         userConfig.lbGroups.forEach(group => {
             const regex = new RegExp(group.regex, 'i');
             const matched = allProxyNames.filter(name => {
@@ -112,14 +95,13 @@ module.exports = async (req, res) => {
                 type: "load-balance",
                 proxies: matched.length > 0 ? matched : ["DIRECT"],
                 url: "http://www.gstatic.com/generate_204",
-                interval: parseInt(intervalTime), // 使用自定义的间隔时间
+                interval: parseInt(intervalTime),
                 strategy: "round-robin"
             });
         });
 
         const unmatchedNodes = allProxyNames.filter(name => !usedNodeNames.has(name));
 
-        // 2. 生成主选择组 ReiaNEXT
         const MY_GROUPS = [
             { 
                 name: "ReiaNEXT", 
@@ -128,31 +110,17 @@ module.exports = async (req, res) => {
             }
         ];
 
-        // 3. 生成应用分流组 (根据用户配置)
-        // 默认的应用列表，如果用户配置里有就用用户的
         const targetApps = userConfig.appGroups || DEFAULT_CONFIG.appGroups;
-        
         Object.keys(targetApps).forEach(appName => {
-            // 获取用户勾选的地区列表 (例如 ["🇯🇵 日本", "🇨🇦 加拿大"])
             const selectedRegions = targetApps[appName] || [];
-            
-            // 转换为实际的组名 (加上 " 自动负载")，并过滤掉当前不存在的组
             const validProxies = selectedRegions
                 .map(regionName => `${regionName} 自动负载`)
                 .filter(fullName => lbGroupsOutput.find(g => g.name === fullName));
-
-            // 如果没选任何地区，或者选的地区都没节点，默认回退到 ReiaNEXT
             const finalProxies = validProxies.length > 0 ? validProxies : [];
             finalProxies.push("ReiaNEXT");
-
-            MY_GROUPS.push({ 
-                name: appName, 
-                type: "select", 
-                proxies: finalProxies
-            });
+            MY_GROUPS.push({ name: appName, type: "select", proxies: finalProxies });
         });
 
-        // 4. 工具组
         MY_GROUPS.push({ name: "♻️ 自动选择", type: "url-test", proxies: allProxyNames, url: "http://www.gstatic.com/generate_204", interval: 86400 });
         MY_GROUPS.push({ name: "🚫 故障转移", type: "fallback", proxies: allProxyNames, url: "http://www.gstatic.com/generate_204", interval: 7200 });
 
@@ -166,46 +134,142 @@ module.exports = async (req, res) => {
         res.status(500).send(`Error: ${err.message}`);
     }
 };
-
-// -----------------------------------------------------------------------
-// 🎨 前端页面
-// -----------------------------------------------------------------------
+//以下为Webui的HTML渲染部分
 function renderAdminPage(config) {
     return `
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN" data-bs-theme="auto">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NextReia 管理后台</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- 引入 Bootstrap 5.3 (支持深色模式) -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body { background: #f4f7f6; padding: 20px; min-height: 100vh; }
-        .card { margin-bottom: 20px; border: none; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-        .card-header { font-weight: 600; background-color: #fff; border-bottom: 1px solid #eee; }
+        :root { --blur-amt: 12px; }
+        body { background-color: var(--bs-body-bg); transition: background-color 0.3s; padding: 20px; min-height: 100vh; }
         
+        .card { margin-bottom: 20px; border: none; box-shadow: 0 4px 12px rgba(0,0,0,0.08); transition: all 0.3s ease; }
+        [data-bs-theme="dark"] .card { box-shadow: 0 4px 12px rgba(0,0,0,0.4); background-color: #2b3035; }
+        .card-header { font-weight: 600; }
+        
+        /* 登录遮罩层 */
         #login-overlay {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.4);
-            backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px);
-            z-index: 9999; display: flex; justify-content: center; align-items: center;
+            background: rgba(255, 255, 255, 0.4); /* 浅色模式下的半透明白 */
+            backdrop-filter: blur(var(--blur-amt)); -webkit-backdrop-filter: blur(var(--blur-amt));
+            z-index: 9998; display: flex; justify-content: center; align-items: center;
+            transition: all 0.3s;
         }
+        /* 深色模式下的遮罩调整 */
+        [data-bs-theme="dark"] #login-overlay { background: rgba(0, 0, 0, 0.6); }
+
         .login-box {
-            background: white; padding: 2rem; border-radius: 12px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.2); width: 90%; max-width: 400px; text-align: center;
+            background: var(--bs-body-bg); padding: 2.5rem; border-radius: 16px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.2); width: 90%; max-width: 420px; text-align: center;
+            border: 1px solid var(--bs-border-color);
         }
+
+        /* 主内容模糊 */
         #main-app { filter: blur(8px); transition: filter 0.3s; pointer-events: none; }
         #main-app.active { filter: blur(0); pointer-events: auto; }
         
-        .app-row { padding: 10px 0; border-bottom: 1px dashed #eee; }
+        /* App 列表样式 */
+        .app-row { padding: 12px 0; border-bottom: 1px dashed var(--bs-border-color); }
         .app-row:last-child { border-bottom: none; }
-        .app-label { font-weight: bold; display: block; margin-bottom: 5px; color: #333; }
+        .app-label { font-weight: bold; display: block; margin-bottom: 8px; color: var(--bs-emphasis-color); }
         .checkbox-grid { display: flex; flex-wrap: wrap; gap: 10px; }
         .region-tag { font-size: 0.9em; cursor: pointer; user-select: none; }
+
+        /* 主题切换按钮位置 (置于所有层级之上) */
+        .theme-switcher { position: fixed; top: 20px; right: 20px; z-index: 9999; }
     </style>
+    <script>
+        // 初始化主题逻辑 (防闪烁)
+        (() => {
+            const getStoredTheme = () => localStorage.getItem('theme');
+            const setStoredTheme = theme => localStorage.setItem('theme', theme);
+            const getPreferredTheme = () => {
+                const storedTheme = getStoredTheme();
+                if (storedTheme) return storedTheme;
+                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            }
+            const setTheme = theme => {
+                if (theme === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                    document.documentElement.setAttribute('data-bs-theme', 'dark');
+                } else {
+                    document.documentElement.setAttribute('data-bs-theme', theme);
+                }
+            }
+            setTheme(getPreferredTheme());
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+                const storedTheme = getStoredTheme();
+                if (storedTheme !== 'light' && storedTheme !== 'dark') {
+                    setTheme(getPreferredTheme());
+                }
+            });
+            window.addEventListener('DOMContentLoaded', () => {
+                const showActiveTheme = (theme, focus = false) => {
+                    const themeSwitcher = document.querySelector('#bd-theme');
+                    if (!themeSwitcher) return;
+                    const activeThemeIcon = document.querySelector('.theme-icon-active');
+                    const btnToActive = document.querySelector(\`[data-bs-theme-value="\${theme}"]\`);
+                    const iconOfActiveBtn = btnToActive.querySelector('svg').innerHTML;
+                    
+                    document.querySelectorAll('[data-bs-theme-value]').forEach(element => {
+                        element.classList.remove('active');
+                        element.setAttribute('aria-pressed', 'false');
+                    });
+                    btnToActive.classList.add('active');
+                    btnToActive.setAttribute('aria-pressed', 'true');
+                    activeThemeIcon.innerHTML = iconOfActiveBtn; // 更新显示的图标
+                }
+                
+                document.querySelectorAll('[data-bs-theme-value]').forEach(toggle => {
+                    toggle.addEventListener('click', () => {
+                        const theme = toggle.getAttribute('data-bs-theme-value');
+                        setStoredTheme(theme);
+                        setTheme(theme);
+                        showActiveTheme(theme, true);
+                    });
+                });
+                showActiveTheme(getPreferredTheme());
+            });
+        })();
+    </script>
 </head>
 <body>
 
+<!-- 🌓 主题切换下拉菜单 (登录前可用) -->
+<div class="dropdown theme-switcher">
+    <button class="btn btn-outline-secondary dropdown-toggle d-flex align-items-center" id="bd-theme" type="button" aria-expanded="false" data-bs-toggle="dropdown" aria-label="Toggle theme">
+        <svg class="bi me-1 theme-icon-active" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 0 8 1v14zm0 1A8 8 0 1 1 8 0a8 8 0 0 1 0 16z"/></svg>
+        <span class="d-none d-lg-block ms-1">主题</span>
+    </button>
+    <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="bd-theme">
+        <li>
+            <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="light">
+                <svg class="bi me-2 opacity-50 theme-icon" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0zm0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13zm8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5zM3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8zm10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0zm-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0zm9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707zM4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .708z"/></svg>
+                浅色
+            </button>
+        </li>
+        <li>
+            <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="dark">
+                <svg class="bi me-2 opacity-50 theme-icon" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z"/></svg>
+                深色
+            </button>
+        </li>
+        <li><hr class="dropdown-divider"></li>
+        <li>
+            <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="auto">
+                <svg class="bi me-2 opacity-50 theme-icon" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 0 8 1v14zm0 1A8 8 0 1 1 8 0a8 8 0 0 1 0 16z"/></svg>
+                跟随系统
+            </button>
+        </li>
+    </ul>
+</div>
+
+<!-- 🔒 登录遮罩 -->
 <div id="login-overlay">
     <div class="login-box">
         <h4 class="mb-4">🔒 管理员验证</h4>
@@ -215,6 +279,7 @@ function renderAdminPage(config) {
     </div>
 </div>
 
+<!-- 🎛️ 主界面 -->
 <div class="container" id="main-app" style="max-width:800px">
     <div class="d-flex justify-content-between align-items-center mb-4 pt-2">
         <h3>🛠️ NextReia 全局后台</h3>
@@ -223,7 +288,7 @@ function renderAdminPage(config) {
     
     <!-- 1. 负载均衡组 -->
     <div class="card">
-        <div class="card-header text-primary">1. 负载均衡组 (Regex)</div>
+        <div class="card-header text-primary bg-body-tertiary">1. 负载均衡组 (Regex)</div>
         <div class="card-body">
             <div id="lb_area"></div>
             <button class="btn btn-sm btn-outline-primary mt-2" onclick="addLB()">+ 增加地区</button>
@@ -232,22 +297,20 @@ function renderAdminPage(config) {
 
     <!-- 2. 分流策略组 -->
     <div class="card">
-        <div class="card-header text-success">2. 分流策略组配置 (勾选允许的地区)</div>
-        <div class="card-body" id="app_area">
-            <!-- JS 自动生成 -->
-        </div>
+        <div class="card-header text-success bg-body-tertiary">2. 分流策略组配置 (勾选允许的地区)</div>
+        <div class="card-body" id="app_area"></div>
     </div>
 
     <!-- 3. 高级设置 -->
     <div class="card">
-        <div class="card-header text-secondary">3. 高级设置</div>
+        <div class="card-header text-secondary bg-body-tertiary">3. 高级设置</div>
         <div class="card-body">
             <div class="mb-3 row align-items-center">
                 <label class="col-sm-4 col-form-label">健康检查间隔 (秒)</label>
                 <div class="col-sm-4">
                     <input type="number" id="interval" class="form-control" value="${config.healthCheckInterval || 120}" min="60">
                 </div>
-                <div class="col-sm-4 text-muted small">默认 120 秒，过短可能导致闪断</div>
+                <div class="col-sm-4 text-muted small">默认 120s，建议 ≥60s</div>
             </div>
             <div class="form-check form-switch">
                 <input class="form-check-input" type="checkbox" id="unmatched" ${config.includeUnmatched ? 'checked' : ''}>
@@ -259,14 +322,14 @@ function renderAdminPage(config) {
     <button class="btn btn-success w-100 p-3 shadow mb-5" onclick="save()">保存全局设置</button>
 </div>
 
+<!-- 引入 Bootstrap JS (用于下拉菜单) -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
 <script>
     let currentConfig = ${JSON.stringify(config)};
     let authToken = ""; 
-
-    // 默认的应用列表 (如果配置里没有，用这个兜底)
     const defaultApps = ["Sora&ChatGPT", "ABEMA", "赛马娘PrettyDerby", "PJSK-JP", "Claude"];
 
-    // === 登录 ===
     async function doLogin() {
         const pwd = document.getElementById('login_pwd').value;
         const msg = document.getElementById('login-msg');
@@ -282,22 +345,16 @@ function renderAdminPage(config) {
                 authToken = pwd;
                 document.getElementById('login-overlay').style.display = 'none';
                 document.getElementById('main-app').classList.add('active');
-                renderUI(); // 登录成功后渲染界面
-            } else {
-                msg.innerText = "密码错误";
-            }
+                renderUI();
+            } else { msg.innerText = "密码错误"; }
         } catch (e) { msg.innerText = "网络错误"; }
     }
     document.getElementById('login_pwd').addEventListener('keypress', e => e.key === 'Enter' && doLogin());
 
-    // === UI 渲染 ===
     function renderUI() {
-        // 1. 渲染负载组输入框
         const lbContainer = document.getElementById('lb_area');
         lbContainer.innerHTML = '';
         currentConfig.lbGroups.forEach(val => addLB(val));
-
-        // 2. 渲染应用分流选择
         renderAppGroups();
     }
 
@@ -309,150 +366,85 @@ function renderAdminPage(config) {
                           <button class="btn btn-danger" onclick="removeLB(this)">×</button>\`;
         document.getElementById('lb_area').appendChild(div);
     }
-
-    function removeLB(btn) {
-        btn.parentElement.remove();
-        updateAppChoices(); // 删除地区后更新选项
-    }
+    function removeLB(btn) { btn.parentElement.remove(); updateAppChoices(); }
 
     function renderAppGroups() {
         const container = document.getElementById('app_area');
         container.innerHTML = '';
-        
-        // 获取当前配置中的 App 列表，如果没有则使用默认
         const apps = Object.keys(currentConfig.appGroups).length > 0 ? Object.keys(currentConfig.appGroups) : defaultApps;
-        
         apps.forEach(appName => {
             const row = document.createElement('div');
-            row.className = 'app-row';
-            row.dataset.app = appName;
-            
-            // 当前该 App 选中的地区
+            row.className = 'app-row'; row.dataset.app = appName;
             const selected = currentConfig.appGroups[appName] || [];
-            
             let html = \`<span class="app-label">\${appName}</span><div class="checkbox-grid">\`;
-            
-            // 动态生成选项：基于当前的 lbGroups
-            // 我们需要实时获取输入框里的值，或者先用 config 里的
-            const currentLBNames = getLBNamesFromDOM();
-            
-            currentLBNames.forEach(lbName => {
+            getLBNamesFromDOM().forEach(lbName => {
                 const isChecked = selected.includes(lbName) ? 'checked' : '';
-                html += \`
-                    <div class="form-check form-check-inline">
+                html += \`<div class="form-check form-check-inline">
                         <input class="form-check-input" type="checkbox" value="\${lbName}" \${isChecked}>
-                        <label class="form-check-label region-tag">\${lbName}</label>
-                    </div>
-                \`;
+                        <label class="form-check-label region-tag">\${lbName}</label></div>\`;
             });
-            
-            html += \`</div>\`;
-            row.innerHTML = html;
-            container.appendChild(row);
+            html += \`</div>\`; row.innerHTML = html; container.appendChild(row);
         });
     }
 
-    // 辅助：从 DOM 获取当前所有的负载组名称
     function getLBNamesFromDOM() {
-        const inputs = document.querySelectorAll('.lb-n');
         const names = [];
-        inputs.forEach(input => {
-            if(input.value) names.push(input.value);
-        });
-        // 如果 DOM 还没渲染完，回退到 config
-        if(names.length === 0) return currentConfig.lbGroups.map(g => g.name);
-        return names;
+        document.querySelectorAll('.lb-n').forEach(input => { if(input.value) names.push(input.value); });
+        return names.length > 0 ? names : currentConfig.lbGroups.map(g => g.name);
     }
 
-    // 当用户修改地区名称或增删地区时，实时更新下面的选项
     function updateAppChoices() {
-        // 保存当前勾选状态
         const tempState = {};
         document.querySelectorAll('.app-row').forEach(row => {
-            const app = row.dataset.app;
-            const checked = Array.from(row.querySelectorAll('input:checked')).map(i => i.value);
-            tempState[app] = checked;
+            tempState[row.dataset.app] = Array.from(row.querySelectorAll('input:checked')).map(i => i.value);
         });
-
-        // 重新渲染，尝试恢复勾选（如果名字变了可能恢复不了，这是符合逻辑的）
-        const container = document.getElementById('app_area');
-        container.innerHTML = '';
+        const container = document.getElementById('app_area'); container.innerHTML = '';
         const currentLBNames = getLBNamesFromDOM();
-        
         Object.keys(tempState).forEach(appName => {
             const row = document.createElement('div');
-            row.className = 'app-row';
-            row.dataset.app = appName;
-            
+            row.className = 'app-row'; row.dataset.app = appName;
             let html = \`<span class="app-label">\${appName}</span><div class="checkbox-grid">\`;
             currentLBNames.forEach(lbName => {
-                // 简单的恢复逻辑：名字完全匹配
                 const isChecked = tempState[appName].includes(lbName) ? 'checked' : '';
-                html += \`
-                    <div class="form-check form-check-inline">
+                html += \`<div class="form-check form-check-inline">
                         <input class="form-check-input" type="checkbox" value="\${lbName}" \${isChecked}>
-                        <label class="form-check-label region-tag">\${lbName}</label>
-                    </div>
-                \`;
+                        <label class="form-check-label region-tag">\${lbName}</label></div>\`;
             });
-            html += \`</div>\`;
-            row.innerHTML = html;
-            container.appendChild(row);
+            html += \`</div>\`; row.innerHTML = html; container.appendChild(row);
         });
     }
 
-    // === 保存逻辑 ===
     async function save() {
-        // 1. 收集 LB Groups
         const lbGroups = Array.from(document.querySelectorAll('.lb-item')).map(el => ({
-            name: el.querySelector('.lb-n').value,
-            regex: el.querySelector('.lb-r').value
+            name: el.querySelector('.lb-n').value, regex: el.querySelector('.lb-r').value
         })).filter(i => i.name);
-
-        // 2. 收集 App Groups
         const appGroups = {};
         document.querySelectorAll('.app-row').forEach(row => {
-            const app = row.dataset.app;
-            const selected = Array.from(row.querySelectorAll('input:checked')).map(i => i.value);
-            appGroups[app] = selected;
+            appGroups[row.dataset.app] = Array.from(row.querySelectorAll('input:checked')).map(i => i.value);
         });
-
         const newConfig = {
-            lbGroups,
-            appGroups,
+            lbGroups, appGroups,
             includeUnmatched: document.getElementById('unmatched').checked,
             healthCheckInterval: document.getElementById('interval').value || 120
         };
-        
         try {
             const resp = await fetch('/?action=saveConfig', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ auth: authToken, newConfig })
             });
-            if(resp.status === 403) {
-                alert("会话已过期，请刷新页面重新登录");
-                location.reload();
-            } else {
-                const res = await resp.json();
-                alert(res.msg);
-                // 更新本地 config 防止下次操作数据不同步
-                currentConfig = newConfig; 
-            }
+            if(resp.status === 403) { alert("会话失效"); location.reload(); }
+            else { const res = await resp.json(); alert(res.msg); currentConfig = newConfig; }
         } catch(e) { alert("保存失败"); }
     }
 
     async function resetConfig() {
-        if(!confirm("确定要重置所有配置为默认状态吗？")) return;
+        if(!confirm("确定重置为默认配置？")) return;
         try {
             const resp = await fetch('/?action=resetConfig', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ auth: authToken })
             });
-            const res = await resp.json();
-            alert(res.msg);
-            location.reload();
+            const res = await resp.json(); alert(res.msg); location.reload();
         } catch(e) { alert("重置失败"); }
     }
 </script>
