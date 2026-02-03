@@ -1,4 +1,4 @@
- /**
+/**
  * NextReia Clash Subscription Converter & Manager
  * Version: 3.0 (Security & Stats & DNS Edition)
  * 
@@ -30,7 +30,7 @@ const DEFAULT_CONFIG = {
     
     // 负载均衡组
     lbGroups: [
-        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰" },
+        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰|IEPL" },
         { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
         { name: "🇨🇦 加拿大", regex: "CA|canada|🇨🇦" }
     ],
@@ -269,7 +269,6 @@ module.exports = async (req, res) => {
         res.status(500).send(`Error: ${err.message}`);
     }
 };
-
 // =======================================================================
 // E. 前端 HTML 模板 (包含 JS 逻辑)
 // =======================================================================
@@ -457,4 +456,356 @@ function renderAdminPage(config) {
                          <div class="col-md-6">
                             <label class="form-label small">Use Hosts</label>
                             <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" 
+                                <input class="form-check-input" type="checkbox" id="dns_hosts" ${dnsDisplay['use-hosts'] ? 'checked' : ''}>
+                            </div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small">Default Nameserver (一行一个)</label>
+                            <textarea id="dns_default_ns" class="form-control" rows="2">${dnsDisplay.defaultNameserver}</textarea>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small">Nameserver (一行一个)</label>
+                            <textarea id="dns_ns" class="form-control" rows="3">${dnsDisplay.nameserver}</textarea>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small">Fallback (一行一个)</label>
+                            <textarea id="dns_fallback" class="form-control" rows="3">${dnsDisplay.fallback}</textarea>
+                        </div>
+                        <div class="col-12"><hr><h6>Fallback Filter</h6></div>
+                        <div class="col-md-4">
+                            <label class="form-label small">GeoIP</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="dns_geoip" ${dnsDisplay['fallback-filter'].geoip ? 'checked' : ''}>
+                            </div>
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label small">IP CIDR (一行一个)</label>
+                            <textarea id="dns_ipcidr" class="form-control" rows="2">${dnsDisplay.ipcidr}</textarea>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small">Domain (一行一个)</label>
+                            <textarea id="dns_domain" class="form-control" rows="3">${dnsDisplay.domain}</textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 4. 高级设置 -->
+            <div class="card">
+                <div class="card-header text-secondary bg-body-tertiary">4. 高级设置</div>
+                <div class="card-body">
+                    <div class="mb-3 row align-items-center">
+                        <label class="col-sm-4 col-form-label">健康检查间隔 (秒)</label>
+                        <div class="col-sm-4">
+                            <input type="number" id="interval" class="form-control" value="${config.healthCheckInterval || 120}" min="60">
+                        </div>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="unmatched" ${config.includeUnmatched ? 'checked' : ''}>
+                        <label class="form-check-label">将未匹配规则的节点放入 ReiaNEXT</label>
+                    </div>
+                </div>
+            </div>
+
+            <button class="btn btn-success w-100 p-3 shadow mb-5" onclick="save()">保存全局配置</button>
+        </div>
+
+        <!-- 统计面板 -->
+        <div class="tab-pane fade" id="stats-pane" role="tabpanel">
+            <div class="card">
+                <div class="card-header bg-body-tertiary d-flex justify-content-between align-items-center">
+                    <span>📊 24小时 User-Agent 统计</span>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="loadStats()">刷新</button>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover mb-0 stats-table">
+                            <thead class="table-light">
+                                <tr>
+                                    <th onclick="sortStats('ua')">User-Agent ↕</th>
+                                    <th onclick="sortStats('count')" class="text-end">请求次数 ↕</th>
+                                </tr>
+                            </thead>
+                            <tbody id="stats_tbody">
+                                <tr><td colspan="2" class="text-center p-3">加载中...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="card-footer small text-muted">
+                    * 统计数据保存在 KV 中，TTL 为 24 小时。仅在订阅下发时记录，不消耗额外后台资源。
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+<!-- 引入 Crypto-JS 用于前端 Hash -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+
+<script>
+    let currentConfig = ${JSON.stringify(config)};
+    let authTokenHash = ""; 
+    const defaultApps = ["Sora&ChatGPT", "ABEMA", "赛马娘PrettyDerby", "PJSK-JP", "Claude"];
+    let statsData = [];
+    let sortAsc = false;
+
+    // === 工具：Hash 计算 ===
+    function hash(str) {
+        return CryptoJS.SHA256(str).toString(CryptoJS.enc.Hex);
+    }
+
+    // === 登录逻辑 ===
+    async function doLogin() {
+        const pwd = document.getElementById('login_pwd').value;
+        const msg = document.getElementById('login-msg');
+        if(!pwd) return msg.innerText = "密码不能为空";
+        
+        const pwdHash = hash(pwd); // 前端 Hash
+
+        try {
+            const resp = await fetch('/?action=login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ authHash: pwdHash })
+            });
+            const res = await resp.json();
+            
+            if (res.success) {
+                authTokenHash = pwdHash;
+                document.getElementById('login-overlay').style.display = 'none';
+                
+                if (res.isDefaultPwd) {
+                    // 如果是默认密码，显示强制修改框
+                    document.getElementById('pwd-overlay').style.display = 'flex';
+                } else {
+                    document.getElementById('main-app').classList.add('active');
+                    renderUI();
+                }
+            } else {
+                msg.innerText = "密码错误";
+            }
+        } catch (e) { msg.innerText = "网络错误"; }
+    }
+    document.getElementById('login_pwd').addEventListener('keypress', e => e.key === 'Enter' && doLogin());
+
+    // === 密码修改逻辑 ===
+    async function changePassword() {
+        const p1 = document.getElementById('new_pwd').value;
+        const p2 = document.getElementById('confirm_pwd').value;
+        const msg = document.getElementById('pwd-msg');
+        
+        if (!p1 || p1.length < 5) return msg.innerText = "密码至少5位";
+        if (p1 !== p2) return msg.innerText = "两次输入不一致";
+
+        const newHash = hash(p1);
+
+        try {
+            const resp = await fetch('/?action=changePassword', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ authHash: authTokenHash, newPassword: newHash })
+            });
+            const res = await resp.json();
+            if (res.success) {
+                alert("密码修改成功，请重新登录");
+                location.reload();
+            } else {
+                msg.innerText = res.msg;
+            }
+        } catch (e) { msg.innerText = "请求失败"; }
+    }
+    
+    function showChangePwd() {
+        document.getElementById('pwd-overlay').style.display = 'flex';
+        // 隐藏修改框的警告信息
+        document.querySelector('#pwd-overlay h4').className = 'mb-3';
+        document.querySelector('#pwd-overlay h4').innerText = '修改密码';
+        document.querySelector('#pwd-overlay p').style.display = 'none';
+    }
+
+    // === 系统重置逻辑 ===
+    async function resetSystem() {
+        if(!confirm("⚠️ 警告：这将清除所有自定义设置并重置密码为 admin！\\n确定要继续吗？")) return;
+        try {
+            const resp = await fetch('/?action=resetSystem', { method: 'POST' });
+            const res = await resp.json();
+            if(res.success) {
+                alert(res.msg);
+                location.reload();
+            }
+        } catch (e) { alert("操作失败"); }
+    }
+
+    // === UI 渲染 ===
+    function renderUI() {
+        const lbContainer = document.getElementById('lb_area');
+        lbContainer.innerHTML = '';
+        currentConfig.lbGroups.forEach(val => addLB(val));
+        renderAppGroups();
+    }
+
+    function addLB(val = {name:'', regex:''}) {
+        const div = document.createElement('div');
+        div.className = 'input-group mb-2 lb-item';
+        div.innerHTML = \`<input type="text" class="form-control lb-n" placeholder="名称" value="\${val.name}" oninput="updateAppChoices()">
+                          <input type="text" class="form-control lb-r" placeholder="正则" value="\${val.regex}">
+                          <button class="btn btn-danger" onclick="removeLB(this)">×</button>\`;
+        document.getElementById('lb_area').appendChild(div);
+    }
+    function removeLB(btn) { btn.parentElement.remove(); updateAppChoices(); }
+
+    function renderAppGroups() {
+        const container = document.getElementById('app_area');
+        container.innerHTML = '';
+        const apps = Object.keys(currentConfig.appGroups).length > 0 ? Object.keys(currentConfig.appGroups) : defaultApps;
+        apps.forEach(appName => {
+            const row = document.createElement('div');
+            row.className = 'app-row p-2 border-bottom'; row.dataset.app = appName;
+            const selected = currentConfig.appGroups[appName] || [];
+            let html = \`<div class="fw-bold mb-1">\${appName}</div><div class="checkbox-grid d-flex flex-wrap gap-2">\`;
+            getLBNamesFromDOM().forEach(lbName => {
+                const isChecked = selected.includes(lbName) ? 'checked' : '';
+                html += \`<div class="form-check form-check-inline m-0">
+                        <input class="form-check-input" type="checkbox" value="\${lbName}" \${isChecked}>
+                        <label class="form-check-label region-tag small">\${lbName}</label></div>\`;
+            });
+            html += \`</div>\`; row.innerHTML = html; container.appendChild(row);
+        });
+    }
+
+    function getLBNamesFromDOM() {
+        const names = [];
+        document.querySelectorAll('.lb-n').forEach(input => { if(input.value) names.push(input.value); });
+        return names.length > 0 ? names : currentConfig.lbGroups.map(g => g.name);
+    }
+
+    function updateAppChoices() {
+        const tempState = {};
+        document.querySelectorAll('.app-row').forEach(row => {
+            tempState[row.dataset.app] = Array.from(row.querySelectorAll('input:checked')).map(i => i.value);
+        });
+        const container = document.getElementById('app_area'); container.innerHTML = '';
+        const currentLBNames = getLBNamesFromDOM();
+        Object.keys(tempState).forEach(appName => {
+            const row = document.createElement('div');
+            row.className = 'app-row p-2 border-bottom'; row.dataset.app = appName;
+            let html = \`<div class="fw-bold mb-1">\${appName}</div><div class="checkbox-grid d-flex flex-wrap gap-2">\`;
+            currentLBNames.forEach(lbName => {
+                const isChecked = tempState[appName].includes(lbName) ? 'checked' : '';
+                html += \`<div class="form-check form-check-inline m-0">
+                        <input class="form-check-input" type="checkbox" value="\${lbName}" \${isChecked}>
+                        <label class="form-check-label region-tag small">\${lbName}</label></div>\`;
+            });
+            html += \`</div>\`; row.innerHTML = html; container.appendChild(row);
+        });
+    }
+
+    // === 统计逻辑 ===
+    async function loadStats() {
+        const tbody = document.getElementById('stats_tbody');
+        tbody.innerHTML = '<tr><td colspan="2" class="text-center">加载中...</td></tr>';
+        
+        try {
+            const resp = await fetch('/?action=getStats', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ authHash: authTokenHash })
+            });
+            const res = await resp.json();
+            if (res.success) {
+                statsData = res.data;
+                renderStats();
+            } else {
+                tbody.innerHTML = '<tr><td colspan="2" class="text-center text-danger">加载失败</td></tr>';
+            }
+        } catch (e) { tbody.innerHTML = '<tr><td colspan="2" class="text-center text-danger">网络错误</td></tr>'; }
+    }
+
+    function renderStats() {
+        const tbody = document.getElementById('stats_tbody');
+        tbody.innerHTML = '';
+        if (statsData.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="2" class="text-center">暂无数据</td></tr>';
+            return;
+        }
+        statsData.forEach(item => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = \`<td class="text-break" style="font-family:monospace; font-size:0.85rem">\${item.ua}</td><td class="text-end">\${item.count}</td>\`;
+            tbody.appendChild(tr);
+        });
+    }
+
+    function sortStats(key) {
+        sortAsc = !sortAsc;
+        statsData.sort((a, b) => {
+            if (key === 'count') return sortAsc ? a.count - b.count : b.count - a.count;
+            return sortAsc ? a.ua.localeCompare(b.ua) : b.ua.localeCompare(a.ua);
+        });
+        renderStats();
+    }
+
+    // === 保存逻辑 ===
+    async function save() {
+        // 1. 收集 LB Groups
+        const lbGroups = Array.from(document.querySelectorAll('.lb-item')).map(el => ({
+            name: el.querySelector('.lb-n').value, regex: el.querySelector('.lb-r').value
+        })).filter(i => i.name);
+        // 2. 收集 App Groups
+        const appGroups = {};
+        document.querySelectorAll('.app-row').forEach(row => {
+            appGroups[row.dataset.app] = Array.from(row.querySelectorAll('input:checked')).map(i => i.value);
+        });
+        // 3. 收集 DNS 设置 (文本转数组)
+        const splitLines = (id) => document.getElementById(id).value.split('\\n').map(s=>s.trim()).filter(s=>s);
+        const dnsSettings = {
+            enable: document.getElementById('dns_enable').checked,
+            ipv6: document.getElementById('dns_ipv6').checked,
+            'default-nameserver': splitLines('dns_default_ns'),
+            'enhanced-mode': document.getElementById('dns_enhanced').value,
+            'fake-ip-range': document.getElementById('dns_fakeip').value,
+            'use-hosts': document.getElementById('dns_hosts').checked,
+            nameserver: splitLines('dns_ns'),
+            fallback: splitLines('dns_fallback'),
+            'fallback-filter': {
+                geoip: document.getElementById('dns_geoip').checked,
+                ipcidr: splitLines('dns_ipcidr'),
+                domain: splitLines('dns_domain')
+            }
+        };
+
+        const newConfig = {
+            lbGroups, appGroups, dnsSettings,
+            includeUnmatched: document.getElementById('unmatched').checked,
+            healthCheckInterval: document.getElementById('interval').value || 120
+        };
+        
+        try {
+            const resp = await fetch('/?action=saveConfig', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ authHash: authTokenHash, newConfig })
+            });
+            const res = await resp.json();
+            if(resp.status === 403) { alert("会话失效，请重新登录"); location.reload(); }
+            else { alert(res.msg); currentConfig = newConfig; }
+        } catch(e) { alert("保存失败"); }
+    }
+    
+    // 重置配置
+    async function resetConfig() {
+        if(!confirm("确定重置配置为默认值？(密码不会被重置)")) return;
+        try {
+            const resp = await fetch('/?action=resetConfig', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ authHash: authTokenHash })
+            });
+            const res = await resp.json();
+            alert(res.msg); location.reload();
+        } catch(e) { alert("重置失败"); }
+    }
+</script>
+</body>
+</html>`;
+}
