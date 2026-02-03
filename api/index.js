@@ -30,7 +30,7 @@ const DEFAULT_CONFIG = {
     
     // 负载均衡组
     lbGroups: [
-        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰|IEPL" },
+        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰" },
         { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
         { name: "🇨🇦 加拿大", regex: "CA|canada|🇨🇦" }
     ],
