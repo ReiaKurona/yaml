@@ -1,6 +1,6 @@
 {
-  "name": "clash-sub-worker",
-  "version": "1.0.0",
+  "name": "clash-sub-manager-pro",
+  "version": "3.0.0",
   "dependencies": {
     "js-yaml": "^4.1.0",
     "axios": "^1.6.2",
