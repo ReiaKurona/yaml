@@ -1,6 +1,6 @@
 /**
  * NextReia Clash Subscription Converter & Manager
- * Version: 5.0 (Full Rules Support, Preview Lab, Enhanced UI)
+ * Version: 5.1 (Syntax Highlight & Dark Mode Fix)
  */
 
 const yaml = require('js-yaml');
@@ -16,7 +16,6 @@ function hashPwd(password) {
 const DEFAULT_PWD_HASH = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918";
 const DEFAULT_APP_NAMES = ["Sora&ChatGPT", "ABEMA", "赛马娘PrettyDerby", "PJSK-JP", "Claude"];
 
-// Mihomo 支持的所有规则类型
 const ALL_RULE_TYPES = [
     "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX", "GEOSITE", 
     "IP-CIDR", "IP-CIDR6", "IP-SUFFIX", "IP-ASN", "GEOIP", "SRC-IP-CIDR", 
@@ -24,7 +23,6 @@ const ALL_RULE_TYPES = [
     "RULE-SET", "AND", "OR", "NOT", "SUB-RULE"
 ];
 
-// 预置策略
 const BUILT_IN_POLICIES = ["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"];
 
 const DEFAULT_CONFIG = {
@@ -32,7 +30,7 @@ const DEFAULT_CONFIG = {
     enableOverwrite: true,
     uiSettings: { backgroundImage: "" },
     lbGroups: [
-        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰|IEPL" },
+        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰" },
         { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
         { name: "🇨🇦 加拿大", regex: "CA|canada|🇨🇦" }
     ],
@@ -43,8 +41,8 @@ const DEFAULT_CONFIG = {
         "PJSK-JP": ["🇯🇵 日本"],
         "Claude": ["🇯🇵 日本", "🇨🇦 加拿大", "🇺🇸 美国", "🇬🇧 英国"]
     },
-    customAppGroups: [], // 自定义策略组
-    customGlobalRules: [], // 自定义全局规则 (DIRECT/REJECT等)
+    customAppGroups: [],
+    customGlobalRules: [],
     groupOrder: [...DEFAULT_APP_NAMES],
     dnsSettings: {
         enable: true,
@@ -83,60 +81,45 @@ module.exports = async (req, res) => {
         const currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
         const currentPwdHash = currentConfig.passwordHash || DEFAULT_PWD_HASH;
 
-        // 1. 登录
         if (action === 'login') {
             if (authHash === currentPwdHash) return res.json({ success: true, isDefaultPwd: currentPwdHash === DEFAULT_PWD_HASH });
             return res.status(403).json({ success: false, msg: "密码错误" });
         }
-
-        // 2. 恢复出厂设置 (彻底清除)
         if (action === 'factoryReset') {
             await kv.flushall();
             return res.json({ success: true, msg: "♻️ 已恢复出厂设置，所有数据已清除，密码重置为 admin" });
         }
-
-        // 3. 预览生成 (不保存，仅返回 YAML)
         if (action === 'preview') {
             if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
             try {
-                const previewRes = await generateConfig(previewUrl, "ClashMeta", currentConfig, true); // 强制覆写模式
+                const previewRes = await generateConfig(previewUrl, "ClashMeta", currentConfig, true);
                 return res.json({ success: true, data: previewRes });
             } catch (e) { return res.json({ success: false, msg: "生成预览失败: " + e.message }); }
         }
-
-        // --- 鉴权 ---
+        
         if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
 
-        // 4. 保存配置
         if (action === 'saveConfig') {
             const configToSave = { ...newConfig, passwordHash: currentPwdHash };
             await kv.set('global_config', configToSave);
             return res.json({ success: true, msg: "✅ 设置已保存" });
         }
-
-        // 5. 重置配置 (保留密码)
         if (action === 'resetConfig') {
             const resetConfig = { ...DEFAULT_CONFIG, passwordHash: currentPwdHash, uiSettings: currentConfig.uiSettings };
             await kv.set('global_config', resetConfig);
-            return res.json({ success: true, msg: "🔄 配置项已重置 (密码及统计保留)" });
+            return res.json({ success: true, msg: "🔄 配置项已重置" });
         }
-
-        // 6. 清空统计
         if (action === 'clearStats') {
             const keys = await kv.keys('stat:*');
             if (keys.length > 0) await kv.del(...keys);
             return res.json({ success: true, msg: "🧹 统计已清空" });
         }
-
-        // 7. 修改密码
         if (action === 'changePassword') {
             if (!newPassword) return res.status(400).json({ msg: "无效密码" });
             const configToSave = { ...currentConfig, passwordHash: newPassword };
             await kv.set('global_config', configToSave);
             return res.json({ success: true, msg: "密码修改成功" });
         }
-
-        // 8. 获取统计
         if (action === 'getStats') {
             try {
                 const keys = await kv.keys('stat:*');
@@ -162,7 +145,6 @@ module.exports = async (req, res) => {
             dnsSettings: { ...DEFAULT_CONFIG.dnsSettings, ...(savedConfig?.dnsSettings || {}) },
             uiSettings: { ...DEFAULT_CONFIG.uiSettings, ...(savedConfig?.uiSettings || {}) }
         };
-        // 兼容性
         if (!currentConfig.customAppGroups) currentConfig.customAppGroups = [];
         if (!currentConfig.customGlobalRules) currentConfig.customGlobalRules = [];
         if (!currentConfig.groupOrder) currentConfig.groupOrder = [...DEFAULT_APP_NAMES];
@@ -171,25 +153,21 @@ module.exports = async (req, res) => {
         return res.send(renderAdminPage(currentConfig));
     }
 
-    // D. 订阅生成 (主入口)
+    // D. 订阅生成
     try {
         const savedConfig = await kv.get('global_config');
         const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
         
-        // 检查是否需要覆写
         const isClash = /clash|mihomo|stash/i.test(ua);
         if (!isClash || !userConfig.enableOverwrite) {
-            // 原样返回
             const response = await axios.get(subUrl, { headers: { 'User-Agent': ua }, responseType: 'text', timeout: 10000 });
             res.setHeader('Content-Type', 'text/plain; charset=utf-8');
             if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
             return res.send(response.data);
         }
 
-        // 执行覆写逻辑
         const yamlResult = await generateConfig(subUrl, ua, userConfig, false);
         
-        // 获取原始 header 以保留流量信息
         const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
         if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
         
@@ -201,19 +179,13 @@ module.exports = async (req, res) => {
     }
 };
 
-// === 核心生成逻辑 (抽离出来供 订阅 和 预览 使用) ===
 async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
     if (!userConfig.customAppGroups) userConfig.customAppGroups = [];
     if (!userConfig.customGlobalRules) userConfig.customGlobalRules = [];
     if (!userConfig.groupOrder) userConfig.groupOrder = [...DEFAULT_APP_NAMES];
     const intervalTime = userConfig.healthCheckInterval || 120;
 
-    const response = await axios.get(subUrl, {
-        headers: { 'User-Agent': 'ClashMeta' }, // 伪装成 Clash 获取配置
-        responseType: 'text',
-        timeout: 10000
-    });
-
+    const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
     let config = yaml.load(response.data);
     const allProxyNames = (config.proxies || []).map(p => p.name);
 
@@ -228,41 +200,26 @@ async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
         const matched = allProxyNames.filter(name => regex.test(name));
         if (matched.length > 0) matched.forEach(n => usedNodeNames.add(n));
         lbGroupsOutput.push({
-            name: `${group.name} 自动负载`, 
-            type: "load-balance",
-            proxies: matched.length > 0 ? matched : ["DIRECT"],
-            url: "http://www.gstatic.com/generate_204",
-            interval: parseInt(intervalTime),
-            strategy: "round-robin"
+            name: `${group.name} 自动负载`, type: "load-balance", proxies: matched.length > 0 ? matched : ["DIRECT"],
+            url: "http://www.gstatic.com/generate_204", interval: parseInt(intervalTime), strategy: "round-robin"
         });
     });
 
     const unmatchedNodes = allProxyNames.filter(name => !usedNodeNames.has(name));
-
-    const MY_GROUPS = [
-        { 
-            name: "ReiaNEXT", 
-            type: "select", 
-            proxies: ["♻️ 自动选择", ...lbGroupsOutput.map(g => g.name), "🚫 故障转移", ...(userConfig.includeUnmatched ? unmatchedNodes : [])] 
-        }
-    ];
+    const MY_GROUPS = [{ name: "ReiaNEXT", type: "select", proxies: ["♻️ 自动选择", ...lbGroupsOutput.map(g => g.name), "🚫 故障转移", ...(userConfig.includeUnmatched ? unmatchedNodes : [])] }];
 
     userConfig.groupOrder.forEach(groupName => {
         let targetProxies = [];
         if (DEFAULT_APP_NAMES.includes(groupName)) {
             const selectedRegions = userConfig.appGroups[groupName] || [];
-            const validProxies = selectedRegions
-                .map(regionName => `${regionName} 自动负载`)
-                .filter(fullName => lbGroupsOutput.find(g => g.name === fullName));
+            const validProxies = selectedRegions.map(r => `${r} 自动负载`).filter(f => lbGroupsOutput.find(g => g.name === f));
             targetProxies = validProxies.length > 0 ? validProxies : [];
         } else {
             const customGroup = userConfig.customAppGroups.find(g => g.name === groupName);
             if (customGroup) {
                 const selectedRegions = customGroup.targetLBs || [];
-                const validProxies = selectedRegions
-                    .map(regionName => `${regionName} 自动负载`)
-                    .filter(fullName => lbGroupsOutput.find(g => g.name === fullName));
-                 targetProxies = validProxies.length > 0 ? validProxies : [];
+                const validProxies = selectedRegions.map(r => `${r} 自动负载`).filter(f => lbGroupsOutput.find(g => g.name === f));
+                targetProxies = validProxies.length > 0 ? validProxies : [];
             }
         }
         targetProxies.push("ReiaNEXT");
@@ -274,33 +231,16 @@ async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
 
     config['proxy-groups'] = [...MY_GROUPS, ...lbGroupsOutput];
 
-    // 规则生成：GlobalCustom -> GroupCustom -> Original
     const injectedRules = [];
-    
-    // 1. 全局自定义规则 (DIRECT, REJECT...)
-    userConfig.customGlobalRules.forEach(r => {
-        const noResolve = r.noResolve ? ',no-resolve' : '';
-        injectedRules.push(`${r.type},${r.value},${r.target}${noResolve}`);
-    });
-
-    // 2. 策略组自定义规则
+    userConfig.customGlobalRules.forEach(r => injectedRules.push(`${r.type},${r.value},${r.target}${r.noResolve ? ',no-resolve' : ''}`));
     userConfig.customAppGroups.forEach(cg => {
-        if (cg.rules && cg.rules.length > 0) {
-            cg.rules.forEach(r => {
-                const noResolve = r.noResolve ? ',no-resolve' : '';
-                injectedRules.push(`${r.type},${r.value},${cg.name}${noResolve}`);
-            });
-        }
+        if (cg.rules) cg.rules.forEach(r => injectedRules.push(`${r.type},${r.value},${cg.name}${r.noResolve ? ',no-resolve' : ''}`));
     });
-
     config.rules = [...injectedRules, ...(config.rules || [])];
 
     return yaml.dump(config);
 }
 
-// =======================================================================
-// E. 前端 HTML
-// =======================================================================
 function renderAdminPage(config) {
     const dns = config.dnsSettings || DEFAULT_CONFIG.dnsSettings;
     const ui = config.uiSettings || { backgroundImage: "" };
@@ -326,9 +266,12 @@ function renderAdminPage(config) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NextReia Pro V5</title>
+    <title>NextReia Pro V5.1</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
     <style>
         :root { --blur-amt: 12px; }
         body { background-color: var(--bs-body-bg); transition: background 0.3s; padding: 20px; min-height: 100vh; padding-top: 60px; }
@@ -346,14 +289,22 @@ function renderAdminPage(config) {
         textarea.form-control { font-family: monospace; font-size: 0.85rem; }
         .list-group-item { cursor: default; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
         .sort-handle { cursor: grab; color: #adb5bd; padding: 5px; font-size: 1.2rem; touch-action: none; }
+        .sort-handle:active { cursor: grabbing; }
         .badge-proxy { background-color: #0d6efd; }
         .badge-browser { background-color: #6c757d; }
-        /* Checkbox grid fix */
         .checkbox-grid { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
         .rule-type-select { max-width: 140px; }
+        
+        /* Dark Mode Fixes */
+        [data-bs-theme="dark"] .btn-outline-dark { color: #f8f9fa; border-color: #f8f9fa; }
+        [data-bs-theme="dark"] .btn-outline-dark:hover { background-color: #f8f9fa; color: #000; }
+        
+        /* Code Preview Block */
+        #preview_container { background-color: #1e1e1e; border-radius: 6px; padding: 15px; border: 1px solid #444; max-height: 600px; overflow: auto; }
+        [data-bs-theme="light"] #preview_container { background-color: #f8f9fa; border: 1px solid #dee2e6; }
+        code { font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace; font-size: 0.85rem; }
     </style>
     <script>
-        // 主题初始化
         (() => {
             const getStoredTheme = () => localStorage.getItem('theme');
             const setStoredTheme = theme => localStorage.setItem('theme', theme);
@@ -389,7 +340,6 @@ function renderAdminPage(config) {
     </div>
 </div>
 
-<!-- 通用规则编辑器 Modal (Groups & Global) -->
 <div class="modal fade" id="ruleModal" tabindex="-1">
     <div class="modal-dialog modal-xl">
         <div class="modal-content">
@@ -425,7 +375,7 @@ function renderAdminPage(config) {
 
 <div class="container" id="main-app" style="max-width:950px">
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="fw-bold">🛠️ NextReia Pro V5</h3>
+        <h3 class="fw-bold">🛠️ NextReia Pro V5.1</h3>
         <div>
             <button class="btn btn-outline-secondary btn-sm me-2" onclick="showChangePwd(false)">修改密码</button>
             <button class="btn btn-danger btn-sm" onclick="doLogout()">退出</button>
@@ -492,6 +442,7 @@ function renderAdminPage(config) {
             <div class="card">
                 <div class="card-header text-secondary bg-body-tertiary">5. 高级设置</div>
                 <div class="card-body">
+                    <!-- 修复深色模式按钮 -->
                     <button class="btn btn-outline-dark w-100 mb-3" onclick="openGlobalRuleEditor()">🌐 编辑全局/预置规则 (DIRECT/REJECT...)</button>
                     <div class="mb-3 row align-items-center">
                         <label class="col-sm-4 col-form-label">健康检查间隔 (秒)</label>
@@ -529,7 +480,9 @@ function renderAdminPage(config) {
                         </div>
                     </div>
                     <label class="form-label">YAML 预览 (只读)</label>
-                    <textarea id="preview_output" class="form-control bg-light" rows="15" readonly style="font-size:0.8rem;"></textarea>
+                    <div id="preview_container">
+                        <pre><code id="preview_code" class="language-yaml"># 点击生成后显示...</code></pre>
+                    </div>
                 </div>
             </div>
         </div>
@@ -552,7 +505,7 @@ function renderAdminPage(config) {
     const DEFAULT_APP_NAMES = ${JSON.stringify(DEFAULT_APP_NAMES)};
     const ALL_RULE_TYPES = ${JSON.stringify(ALL_RULE_TYPES)};
     const BUILT_IN_POLICIES = ${JSON.stringify(BUILT_IN_POLICIES)};
-    let editingMode = null; // 'group' or 'global'
+    let editingMode = null; 
     let editingGroupName = null;
     let myChart = null;
     
@@ -564,7 +517,6 @@ function renderAdminPage(config) {
 
     function hash(str) { return CryptoJS.SHA256(str).toString(CryptoJS.enc.Hex); }
 
-    // --- Login & Reset ---
     async function doLogin() {
         const pwd = document.getElementById('login_pwd').value;
         const pwdHash = hash(pwd);
@@ -584,7 +536,6 @@ function renderAdminPage(config) {
     async function factoryReset() { if(!confirm("⚠️ 严重警告：这将彻底清除所有数据(含密码)！")) return; await fetch('/?action=factoryReset', { method: 'POST' }); alert("已恢复出厂设置"); location.reload(); }
     async function resetConfig() { if(!confirm("仅重置配置项(保留密码/统计)？")) return; await fetch('/?action=resetConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) }); alert("配置已重置"); location.reload(); }
 
-    // --- UI Rendering ---
     function renderUI() {
         document.getElementById('lb_area').innerHTML = '';
         config.lbGroups.forEach(val => addLB(val));
@@ -627,26 +578,21 @@ function renderAdminPage(config) {
         renderSortableGroups(); renderAppGroups();
     }
 
-    // --- Rule Editor Logic (Unified) ---
     const ruleModal = new bootstrap.Modal(document.getElementById('ruleModal'));
-    
     function openRuleEditor(mode, groupName) {
-        editingMode = mode;
-        editingGroupName = groupName;
+        editingMode = mode; editingGroupName = groupName;
         const container = document.getElementById('rule-list-container'); container.innerHTML = '';
         const targetSection = document.getElementById('modal-target-section');
-        
         let rules = [];
         if (mode === 'global') {
             document.getElementById('ruleModalTitle').innerText = "全局/预置规则";
             rules = config.customGlobalRules || [];
-            targetSection.style.display = 'none'; // 全局规则的目标是 dropdown 选择的，不是多选组
+            targetSection.style.display = 'none';
         } else {
             document.getElementById('ruleModalTitle').innerText = groupName;
             const grp = config.customAppGroups.find(g => g.name === groupName);
             rules = grp ? (grp.rules || []) : [];
             targetSection.style.display = 'block';
-            // Render LB Choices
             const appChoiceContainer = document.getElementById('modal-app-choices'); appChoiceContainer.innerHTML = '';
             const targets = grp ? (grp.targetLBs || []) : [];
             getLBNames().forEach(lb => {
@@ -654,68 +600,41 @@ function renderAdminPage(config) {
                 appChoiceContainer.innerHTML += \`<div class="form-check form-check-inline border p-1 rounded"><input class="form-check-input modal-target-chk" type="checkbox" value="\${lb}" \${chk}><label class="form-check-label small">\${lb}</label></div>\`;
             });
         }
-        
         rules.forEach(r => addRuleRow(r.type, r.value, r.target, r.noResolve));
         ruleModal.show();
     }
-    
-    // 打开全局编辑器入口
     function openGlobalRuleEditor() { openRuleEditor('global'); }
 
     function addRuleRow(type = 'DOMAIN-SUFFIX', val = '', target = '', noResolve = false) {
         const div = document.createElement('div'); div.className = 'input-group mb-2 rule-row';
-        
-        // Type Select
         let typeOpts = ALL_RULE_TYPES.map(t => \`<option value="\${t}" \${type===t?'selected':''}>\${t}</option>\`).join('');
-        
-        // Target Input (For Global, it's a dropdown; For Group, it's hidden/unused here logic handled by checkbox)
         let targetInput = '';
         if (editingMode === 'global') {
             let policyOpts = BUILT_IN_POLICIES.map(p => \`<option value="\${p}" \${target===p?'selected':''}>\${p}</option>\`).join('');
             targetInput = \`<select class="form-select form-select-sm rule-target" style="max-width:120px">\${policyOpts}</select>\`;
         }
-
-        // No-Resolve Checkbox
         let nrCheck = \`<div class="input-group-text"><input class="form-check-input mt-0 rule-no-resolve" type="checkbox" \${noResolve?'checked':''} aria-label="no-resolve"> <span class="small ms-1">no-res</span></div>\`;
-
-        div.innerHTML = \`
-            <select class="form-select form-select-sm rule-type rule-type-select">\${typeOpts}</select>
-            <input type="text" class="form-control form-control-sm rule-value" placeholder="值 (google.com)" value="\${val}">
-            \${targetInput}
-            \${nrCheck}
-            <button class="btn btn-outline-danger btn-sm" onclick="this.parentElement.remove()">×</button>
-        \`;
+        div.innerHTML = \`<select class="form-select form-select-sm rule-type rule-type-select">\${typeOpts}</select><input type="text" class="form-control form-control-sm rule-value" placeholder="值" value="\${val}">\${targetInput}\${nrCheck}<button class="btn btn-outline-danger btn-sm" onclick="this.parentElement.remove()">×</button>\`;
         document.getElementById('rule-list-container').appendChild(div);
     }
 
     function saveRulesFromModal() {
         const rows = document.querySelectorAll('.rule-row');
         const newRules = Array.from(rows).map(row => {
-            const r = {
-                type: row.querySelector('.rule-type').value,
-                value: row.querySelector('.rule-value').value,
-                noResolve: row.querySelector('.rule-no-resolve').checked
-            };
-            if (editingMode === 'global') {
-                r.target = row.querySelector('.rule-target').value;
-            }
+            const r = { type: row.querySelector('.rule-type').value, value: row.querySelector('.rule-value').value, noResolve: row.querySelector('.rule-no-resolve').checked };
+            if (editingMode === 'global') r.target = row.querySelector('.rule-target').value;
             return r;
         }).filter(r => r.value);
-
-        if (editingMode === 'global') {
-            config.customGlobalRules = newRules;
-        } else {
+        if (editingMode === 'global') { config.customGlobalRules = newRules; } 
+        else {
             const targets = Array.from(document.querySelectorAll('.modal-target-chk:checked')).map(i => i.value);
             const grp = config.customAppGroups.find(g => g.name === editingGroupName);
             if (grp) { grp.rules = newRules; grp.targetLBs = targets; } 
             else { config.customAppGroups.push({ name: editingGroupName, rules: newRules, targetLBs: targets }); }
         }
-        
-        ruleModal.hide(); 
-        if(editingMode !== 'global') renderAppGroups(); 
+        ruleModal.hide(); if(editingMode !== 'global') renderAppGroups(); 
     }
 
-    // --- App Groups (Mixed) ---
     function renderAppGroups() {
         const container = document.getElementById('app_area'); container.innerHTML = '';
         config.groupOrder.forEach(appName => {
@@ -735,7 +654,6 @@ function renderAdminPage(config) {
     function getLBNames() { const names = []; document.querySelectorAll('.lb-n').forEach(i => { if(i.value) names.push(i.value); }); return names.length > 0 ? names : config.lbGroups.map(g => g.name); }
     function addLB(val = {name:'', regex:''}) { const div = document.createElement('div'); div.className = 'input-group mb-2 lb-item'; div.innerHTML = \`<input type="text" class="form-control lb-n" value="\${val.name}"><input type="text" class="form-control lb-r" value="\${val.regex}"><button class="btn btn-danger" onclick="this.parentElement.remove(); renderAppGroups();">×</button>\`; document.getElementById('lb_area').appendChild(div); }
 
-    // --- Save & Preview ---
     async function save() {
         const lbGroups = Array.from(document.querySelectorAll('.lb-item')).map(el => ({ name: el.querySelector('.lb-n').value, regex: el.querySelector('.lb-r').value })).filter(i=>i.name);
         const appGroups = {}; const updatedCustomGroups = [...config.customAppGroups];
@@ -769,15 +687,16 @@ function renderAdminPage(config) {
     async function generatePreview() {
         const url = document.getElementById('preview_sub_url').value;
         if(!url) return alert("请输入订阅链接");
-        document.getElementById('preview_output').value = "生成中...";
+        document.getElementById('preview_code').textContent = "生成中...";
         try {
             const res = await (await fetch('/?action=preview', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash, previewUrl: url }) })).json();
-            if(res.success) document.getElementById('preview_output').value = res.data;
-            else document.getElementById('preview_output').value = "错误: " + res.msg;
-        } catch(e) { document.getElementById('preview_output').value = "网络错误"; }
+            if(res.success) {
+                document.getElementById('preview_code').textContent = res.data;
+                Prism.highlightElement(document.getElementById('preview_code'));
+            } else document.getElementById('preview_code').textContent = "错误: " + res.msg;
+        } catch(e) { document.getElementById('preview_code').textContent = "网络错误"; }
     }
 
-    // --- Stats & Password ---
     async function loadStats() {
         const res = await (await fetch('/?action=getStats', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) })).json();
         if (res.success) { renderStats(res.data, res.globalOverwrite); }
@@ -789,14 +708,10 @@ function renderAdminPage(config) {
     function renderStats(data, isOverwriteEnabled) {
         currentStatsData = data; currentIsOverwrite = isOverwriteEnabled;
         const container = document.getElementById('stats_tables'); container.innerHTML = '';
-        
         const proxyClients = data.filter(i => /Clash|Mihomo|Stash|Shadowrocket|Surfboard|v2ray/i.test(i.ua));
         const browserClients = data.filter(i => !/Clash|Mihomo|Stash|Shadowrocket|Surfboard|v2ray/i.test(i.ua));
-        
         container.innerHTML += createStatsTable("🚀 代理客户端", proxyClients, true);
         container.innerHTML += createStatsTable("🌐 浏览器 / 其他", browserClients, false);
-        
-        // Chart
         if (myChart) myChart.destroy();
         const ctx = document.getElementById('statsChart').getContext('2d');
         const categoryMap = {};
@@ -812,11 +727,8 @@ function renderAdminPage(config) {
 
     function createStatsTable(title, items, showOverwrite) {
         if (items.length === 0) return '';
-        // Sort
         items.sort((a, b) => statsSortKey === 'count' ? (statsSortAsc ? a.count - b.count : b.count - a.count) : (statsSortAsc ? a.ua.localeCompare(b.ua) : b.ua.localeCompare(a.ua)));
-        
-        let html = \`<h6 class="mt-4">\${title}</h6><div class="table-responsive"><table class="table table-sm table-striped">
-            <thead><tr><th onclick="toggleSort('ua')" style="cursor:pointer">UA ↕</th>\${showOverwrite?'<th>覆写状态</th>':''}<th onclick="toggleSort('count')" class="text-end" style="cursor:pointer">次数 ↕</th></tr></thead><tbody>\`;
+        let html = \`<h6 class="mt-4">\${title}</h6><div class="table-responsive"><table class="table table-sm table-striped"><thead><tr><th onclick="toggleSort('ua')" style="cursor:pointer">UA ↕</th>\${showOverwrite?'<th>覆写状态</th>':''}<th onclick="toggleSort('count')" class="text-end" style="cursor:pointer">次数 ↕</th></tr></thead><tbody>\`;
         items.forEach(i => {
             let status = '';
             if(showOverwrite) {
@@ -835,7 +747,6 @@ function renderAdminPage(config) {
     }
 
     async function clearStats() { if(!confirm("清空统计？")) return; await fetch('/?action=clearStats', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) }); loadStats(); }
-    
     function showChangePwd(forced) { const m = document.getElementById('pwd-overlay'); m.style.display = 'flex'; document.getElementById('pwd-close-btn').style.display = forced ? 'none' : 'block'; m.onclick = forced ? null : ((e) => { if(e.target===m) closePwdModal() }); document.getElementById('pwd-warning').style.display = forced ? 'block' : 'none'; }
     function closePwdModal() { document.getElementById('pwd-overlay').style.display = 'none'; }
     async function changePassword() { const p1 = document.getElementById('new_pwd').value, p2 = document.getElementById('confirm_pwd').value; if(p1.length<5 || p1!==p2) return alert("无效"); const res = await (await fetch('/?action=changePassword', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash, newPassword: hash(p1) }) })).json(); if(res.success) { alert("成功"); location.reload(); } else { alert(res.msg); } }
