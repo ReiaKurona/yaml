@@ -1,6 +1,6 @@
 /**
  * NextReia Clash Subscription Converter & Manager
- * Version: 6.2 (Syntax Fix & Crash Protection)
+ * Version: 6.3 (UI Empty State Fix)
  */
 
 const yaml = require('js-yaml');
@@ -59,7 +59,7 @@ const DEFAULT_CONFIG = {
     healthCheckInterval: 120
 };
 
-// 全局错误捕获，防止 500 页面
+// 全局错误捕获
 module.exports = async (req, res) => {
     try {
         await handleRequest(req, res);
@@ -291,7 +291,7 @@ function renderAdminPage(config) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NextReia Pro V6.2</title>
+    <title>NextReia Pro V6.3</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
@@ -314,6 +314,7 @@ function renderAdminPage(config) {
         textarea.form-control { font-family: monospace; font-size: 0.85rem; }
         .list-group-item { cursor: default; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
         .sort-handle { cursor: grab; color: #adb5bd; padding: 5px; font-size: 1.2rem; touch-action: none; }
+        .sort-handle:active { cursor: grabbing; }
         .badge-proxy { background-color: #0d6efd; }
         .badge-browser { background-color: #6c757d; }
         .checkbox-grid { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; width: 100%; }
@@ -402,7 +403,7 @@ function renderAdminPage(config) {
 
 <div class="container" id="main-app" style="max-width:950px">
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="fw-bold">🛠️ NextReia Pro V6.2</h3>
+        <h3 class="fw-bold">🛠️ NextReia Pro V6.3</h3>
         <div><button class="btn btn-outline-secondary btn-sm me-2" onclick="showChangePwd(false)">修改密码</button><button class="btn btn-danger btn-sm" onclick="doLogout()">退出</button></div>
     </div>
 
@@ -486,7 +487,7 @@ function renderAdminPage(config) {
     document.getElementById('login_pwd').addEventListener('keypress', e => e.key === 'Enter' && doLogin());
     function doLogout() { sessionStorage.removeItem('authHash'); location.reload(); }
     async function factoryReset() { if(!confirm("⚠️ 严重警告：彻底清除所有数据？")) return; await fetch('/?action=factoryReset', { method: 'POST' }); alert("已重置"); location.reload(); }
-    async function resetConfig() { if(!confirm("仅重置配置？")) return; await fetch('/?action=resetConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) }); alert("已重置"); location.reload(); }
+    async function resetConfig() { if(!confirm("仅重置配置？")) return; await fetch('/?action=resetConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) }); alert("配置已重置"); location.reload(); }
 
     function renderUI() { document.getElementById('lb_area').innerHTML = ''; config.lbGroups.forEach(val => addLB(val)); renderSortableGroups(); renderAppGroups(); }
     
@@ -680,14 +681,21 @@ function renderAdminPage(config) {
     
     function renderStats(data, isOverwriteEnabled) {
         const container = document.getElementById('stats_tables'); container.innerHTML = '';
+        if (!data || data.length === 0) {
+            container.innerHTML = '<div class="text-center text-muted py-5">暂无数据，请尝试连接一次订阅链接</div>';
+            if(myChart) myChart.destroy();
+            return;
+        }
+
         if(currentStatsType === 'ua') {
             const proxyClients = data.filter(i => /Clash|Mihomo|Stash|Shadowrocket|Surfboard|v2ray/i.test(i.label));
             const browserClients = data.filter(i => !/Clash|Mihomo|Stash|Shadowrocket|Surfboard|v2ray/i.test(i.label));
-            container.innerHTML += createStatsTable("🚀 代理客户端", proxyClients, true, isOverwriteEnabled);
-            container.innerHTML += createStatsTable("🌐 浏览器 / 其他", browserClients, false);
+            if(proxyClients.length > 0) container.innerHTML += createStatsTable("🚀 代理客户端", proxyClients, true, isOverwriteEnabled);
+            if(browserClients.length > 0) container.innerHTML += createStatsTable("🌐 浏览器 / 其他", browserClients, false);
         } else {
             container.innerHTML += createStatsTable("📍 来源 IP", data, false);
         }
+        
         if (myChart) myChart.destroy();
         const ctx = document.getElementById('statsChart').getContext('2d');
         const labels = data.slice(0,10).map(i=>i.label.substring(0,20));
