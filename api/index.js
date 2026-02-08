@@ -1,6 +1,6 @@
 /**
  * NextReia Clash Subscription Converter & Manager
- * Version: 6.2 (Stable Edition - No IP Stats)
+ * Version: 6.2 (Syntax Fix & Crash Protection)
  */
 
 const yaml = require('js-yaml');
@@ -59,45 +59,42 @@ const DEFAULT_CONFIG = {
     healthCheckInterval: 120
 };
 
-// === 全局错误拦截 ===
+// 全局错误捕获，防止 500 页面
 module.exports = async (req, res) => {
     try {
         await handleRequest(req, res);
     } catch (err) {
         console.error("Runtime Error:", err);
         res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.send(`
-            <div style="font-family:sans-serif;padding:2rem;">
-                <h3 style="color:red">🔴 系统运行错误</h3>
-                <p>请检查 Vercel 的 KV 数据库连接是否正常，或 package.json 依赖是否完整。</p>
-                <pre style="background:#eee;padding:10px;border-radius:5px">${err.message}</pre>
-            </div>
-        `);
+        res.send(`<div style="padding:20px;font-family:sans-serif;"><h3>🔴 服务端错误</h3><p>请检查 KV 数据库连接或依赖安装。</p><pre style="background:#eee;padding:10px;">${err.stack}</pre></div>`);
     }
 };
 
-// === 核心逻辑 ===
 async function handleRequest(req, res) {
     const { url: subUrl, action } = req.query;
     const ua = req.headers['user-agent'] || 'Unknown';
+    const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0] : (req.socket.remoteAddress || 'Unknown');
 
-    // A. 统计逻辑 (仅 UA 和 总数，移除了 IP)
+    // A. 统计逻辑
     if (subUrl && !action) {
         (async () => {
             try {
-                // UA 统计
                 const uaKey = `stat:ua:${Buffer.from(ua).toString('base64')}`;
                 await kv.incr(uaKey);
                 await kv.expire(uaKey, 86400);
-                // 总数统计
+                
+                const ipKey = `stat:ip:${clientIp}`;
+                await kv.incr(ipKey);
+                await kv.expire(ipKey, 86400);
+
                 await kv.incr('stat:total');
-            } catch (e) { console.error("Stats Error:", e); }
+            } catch (e) { console.error("Stats Error (Non-blocking):", e.message); }
         })();
     }
 
     // B. 管理 API
     if (req.method === 'POST') {
-        const { authHash, newConfig, newPassword, previewUrl } = req.body;
+        const { authHash, newConfig, newPassword, previewUrl, type: statsType } = req.body;
         const savedConfig = await kv.get('global_config');
         const currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
         const currentPwdHash = currentConfig.passwordHash || DEFAULT_PWD_HASH;
@@ -110,7 +107,7 @@ async function handleRequest(req, res) {
         // Factory Reset
         if (action === 'factoryReset') {
             await kv.flushall();
-            return res.json({ success: true, msg: "♻️ 已恢复出厂设置，所有数据已清除" });
+            return res.json({ success: true, msg: "♻️ 已恢复出厂设置" });
         }
         // Preview
         if (action === 'preview') {
@@ -121,6 +118,7 @@ async function handleRequest(req, res) {
             } catch (e) { return res.json({ success: false, msg: "生成预览失败: " + e.message }); }
         }
         
+        // Auth check
         if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
 
         if (action === 'saveConfig') {
@@ -144,18 +142,21 @@ async function handleRequest(req, res) {
             await kv.set('global_config', configToSave);
             return res.json({ success: true, msg: "密码修改成功" });
         }
-        // Stats API (仅返回 UA)
         if (action === 'getStats') {
             try {
-                const keys = await kv.keys('stat:ua:*');
+                const reqType = statsType || 'ua';
+                const matchPattern = reqType === 'ip' ? 'stat:ip:*' : 'stat:ua:*';
+                const keys = await kv.keys(matchPattern);
                 const total = await kv.get('stat:total') || 0;
                 
                 const stats = [];
                 if (keys.length > 0) {
                     const values = await kv.mget(...keys);
                     keys.forEach((key, index) => {
-                        let label = key.replace('stat:ua:', '');
-                        try { label = Buffer.from(label, 'base64').toString('utf-8'); } catch(e){ label = "Invalid Key"; }
+                        let label = key.replace(reqType === 'ip' ? 'stat:ip:' : 'stat:ua:', '');
+                        if (reqType === 'ua') {
+                            try { label = Buffer.from(label, 'base64').toString('utf-8'); } catch(e){ label = "Invalid Key"; }
+                        }
                         stats.push({ label: label, count: parseInt(values[index] || 0) });
                     });
                 }
@@ -393,7 +394,6 @@ function renderAdminPage(config) {
     <div class="login-box">
         <div id="pwd-close-btn" style="position:absolute;top:10px;right:15px;cursor:pointer;font-size:1.5rem;" onclick="closePwdModal()">&times;</div>
         <h4 class="mb-3 text-warning">⚠️ 修改密码</h4>
-        <p id="pwd-warning" class="small text-muted" style="display:none">正在使用默认密码。请立即修改。</p>
         <input type="password" id="new_pwd" class="form-control mb-2" placeholder="新密码">
         <input type="password" id="confirm_pwd" class="form-control mb-3" placeholder="确认新密码">
         <button class="btn btn-warning w-100" onclick="changePassword()">确认修改</button>
@@ -428,8 +428,15 @@ function renderAdminPage(config) {
                 <div class="card-header text-info bg-body-tertiary d-flex align-items-center">4. DNS 覆写设置</div>
                 <div class="card-body">
                     <div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" id="dns_enable" ${dnsDisplay.enable ? 'checked' : ''}><label class="form-check-label fw-bold">启用</label></div>
-                    <!-- DNS Fields omitted for brevity, same as V5.1 -->
-                    <div class="row g-3"><div class="col-md-6"><label class="form-label small">IPv6</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_ipv6" ${dnsDisplay.ipv6 ? 'checked' : ''}></div></div><div class="col-md-6"><label class="form-label small">Enhanced Mode</label><select id="dns_enhanced" class="form-select form-select-sm"><option value="fake-ip" ${dnsDisplay['enhanced-mode'] === 'fake-ip' ? 'selected' : ''}>fake-ip</option><option value="redir-host" ${dnsDisplay['enhanced-mode'] === 'redir-host' ? 'selected' : ''}>redir-host</option></select></div><div class="col-md-6"><label class="form-label small">Fake-IP Range</label><input type="text" id="dns_fakeip" class="form-control form-control-sm" value="${dnsDisplay['fake-ip-range']}"></div><div class="col-md-6"><label class="form-label small">Use Hosts</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_hosts" ${dnsDisplay['use-hosts'] ? 'checked' : ''}></div></div><div class="col-12"><label class="form-label small">Default Nameserver</label><textarea id="dns_default_ns" class="form-control" rows="2">${dnsDisplay.defaultNameserver}</textarea></div><div class="col-12"><label class="form-label small">Nameserver</label><textarea id="dns_ns" class="form-control" rows="3">${dnsDisplay.nameserver}</textarea></div><div class="col-12"><label class="form-label small">Fallback</label><textarea id="dns_fallback" class="form-control" rows="3">${dnsDisplay.fallback}</textarea></div><div class="col-12"><hr><h6>Fallback Filter</h6></div><div class="col-md-4"><label class="form-label small">GeoIP</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_geoip" ${dnsDisplay['fallback-filter'].geoip ? 'checked' : ''}></div></div><div class="col-md-8"><label class="form-label small">IP CIDR</label><textarea id="dns_ipcidr" class="form-control" rows="2">${dnsDisplay.ipcidr}</textarea></div><div class="col-12"><label class="form-label small">Domain</label><textarea id="dns_domain" class="form-control" rows="3">${dnsDisplay.domain}</textarea></div></div>
+                    <div class="row g-3">
+                        <div class="col-md-6"><label class="form-label small">IPv6</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_ipv6" ${dnsDisplay.ipv6 ? 'checked' : ''}></div></div>
+                        <div class="col-md-6"><label class="form-label small">Enhanced Mode</label><select id="dns_enhanced" class="form-select form-select-sm"><option value="fake-ip" ${dnsDisplay['enhanced-mode'] === 'fake-ip' ? 'selected' : ''}>fake-ip</option><option value="redir-host" ${dnsDisplay['enhanced-mode'] === 'redir-host' ? 'selected' : ''}>redir-host</option></select></div>
+                        <div class="col-md-6"><label class="form-label small">Fake-IP Range</label><input type="text" id="dns_fakeip" class="form-control form-control-sm" value="${dnsDisplay['fake-ip-range']}"></div><div class="col-md-6"><label class="form-label small">Use Hosts</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_hosts" ${dnsDisplay['use-hosts'] ? 'checked' : ''}></div></div>
+                        <div class="col-12"><label class="form-label small">Default Nameserver</label><textarea id="dns_default_ns" class="form-control" rows="2">${dnsDisplay.defaultNameserver}</textarea></div>
+                        <div class="col-12"><label class="form-label small">Nameserver</label><textarea id="dns_ns" class="form-control" rows="3">${dnsDisplay.nameserver}</textarea></div>
+                        <div class="col-12"><label class="form-label small">Fallback</label><textarea id="dns_fallback" class="form-control" rows="3">${dnsDisplay.fallback}</textarea></div>
+                        <div class="col-12"><hr><h6>Fallback Filter</h6></div><div class="col-md-4"><label class="form-label small">GeoIP</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_geoip" ${dnsDisplay['fallback-filter'].geoip ? 'checked' : ''}></div></div><div class="col-md-8"><label class="form-label small">IP CIDR</label><textarea id="dns_ipcidr" class="form-control" rows="2">${dnsDisplay.ipcidr}</textarea></div><div class="col-12"><label class="form-label small">Domain</label><textarea id="dns_domain" class="form-control" rows="3">${dnsDisplay.domain}</textarea></div>
+                    </div>
                 </div>
             </div>
             <div class="card"><div class="card-header text-secondary bg-body-tertiary">5. 高级设置</div><div class="card-body"><button class="btn btn-outline-dark w-100 mb-3" onclick="openGlobalRuleEditor()">🌐 编辑全局/预置规则</button><div class="mb-3 row align-items-center"><label class="col-sm-4 col-form-label">健康检查间隔 (秒)</label><div class="col-sm-4"><input type="number" id="interval" class="form-control" value="${config.healthCheckInterval || 120}" min="60"></div></div><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="unmatched" ${config.includeUnmatched ? 'checked' : ''}><label class="form-check-label">未匹配节点放入 ReiaNEXT</label></div></div></div>
@@ -447,7 +454,7 @@ function renderAdminPage(config) {
         </div>
 
         <div class="tab-pane fade" id="stats-pane">
-            <div class="card"><div class="card-header bg-body-tertiary d-flex justify-content-between align-items-center"><span>📊 统计 <span id="total-req" class="badge bg-secondary ms-2"></span></span><div><button class="btn btn-sm btn-outline-danger me-2" onclick="clearStats()">清空</button><button class="btn btn-sm btn-outline-secondary" onclick="loadStats()">刷新</button></div></div><div class="card-body"><div class="chart-container d-flex justify-content-center"><canvas id="statsChart"></canvas></div><div id="stats_tables"></div></div></div>
+            <div class="card"><div class="card-header bg-body-tertiary d-flex justify-content-between align-items-center"><span>📊 统计 <span id="total-req" class="badge bg-secondary ms-2"></span></span><div><div class="btn-group me-2" role="group"><button type="button" class="btn btn-sm btn-outline-primary active" id="btn-ua" onclick="switchStats('ua')">UA视图</button><button type="button" class="btn btn-sm btn-outline-primary" id="btn-ip" onclick="switchStats('ip')">IP视图</button></div><button class="btn btn-sm btn-outline-danger me-2" onclick="clearStats()">清空</button><button class="btn btn-sm btn-outline-secondary" onclick="loadStats()">刷新</button></div></div><div class="card-body"><div class="chart-container d-flex justify-content-center"><canvas id="statsChart"></canvas></div><div id="stats_tables"></div></div></div>
         </div>
     </div>
 </div>
@@ -463,12 +470,12 @@ function renderAdminPage(config) {
     const ALL_RULE_TYPES = ${JSON.stringify(ALL_RULE_TYPES)};
     const BUILT_IN_POLICIES = ${JSON.stringify(BUILT_IN_POLICIES)};
     let editingMode = null; let editingGroupName = null; let myChart = null;
-    let statsSortKey = 'count'; let statsSortAsc = false; let currentStatsData = []; let currentIsOverwrite = true;
+    let currentStatsType = 'ua'; let statsSortKey = 'count'; let statsSortAsc = false;
+    let currentStatsData = []; let currentIsOverwrite = true;
 
     if(authTokenHash) { document.getElementById('login-overlay').style.display = 'none'; document.getElementById('main-app').classList.add('active'); renderUI(); }
     function hash(str) { return CryptoJS.SHA256(str).toString(CryptoJS.enc.Hex); }
 
-    // --- Login & Reset ---
     async function doLogin() {
         const pwd = document.getElementById('login_pwd').value; const pwdHash = hash(pwd);
         try {
@@ -479,9 +486,10 @@ function renderAdminPage(config) {
     document.getElementById('login_pwd').addEventListener('keypress', e => e.key === 'Enter' && doLogin());
     function doLogout() { sessionStorage.removeItem('authHash'); location.reload(); }
     async function factoryReset() { if(!confirm("⚠️ 严重警告：彻底清除所有数据？")) return; await fetch('/?action=factoryReset', { method: 'POST' }); alert("已重置"); location.reload(); }
-    async function resetConfig() { if(!confirm("仅重置配置？")) return; await fetch('/?action=resetConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) }); alert("配置已重置"); location.reload(); }
+    async function resetConfig() { if(!confirm("仅重置配置？")) return; await fetch('/?action=resetConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) }); alert("已重置"); location.reload(); }
 
     function renderUI() { document.getElementById('lb_area').innerHTML = ''; config.lbGroups.forEach(val => addLB(val)); renderSortableGroups(); renderAppGroups(); }
+    
     function renderSortableGroups() {
         const list = document.getElementById('sortable-groups'); list.innerHTML = '';
         config.groupOrder.forEach(name => {
@@ -493,6 +501,7 @@ function renderAdminPage(config) {
         });
         new Sortable(list, { handle: '.sort-handle', animation: 150, ghostClass: 'ghost-class', onEnd: function (evt) { config.groupOrder = Array.from(list.children).map(li => li.dataset.name); renderAppGroups(); } });
     }
+    
     function addNewCustomGroup() { const name = prompt("新组名称:", "MyGroup"); if (name && !config.groupOrder.includes(name)) { config.groupOrder.splice(1, 0, name); config.customAppGroups.push({ name: name, rules: [], targetLBs: [] }); renderSortableGroups(); renderAppGroups(); } }
     function deleteCustomGroup(name) { if (!confirm(\`确认删除 \${name} ?\`)) return; config.groupOrder = config.groupOrder.filter(n => n !== name); config.customAppGroups = config.customAppGroups.filter(g => g.name !== name); renderSortableGroups(); renderAppGroups(); }
     function updateGroupName(oldName, newName) {
@@ -654,44 +663,45 @@ function renderAdminPage(config) {
         } catch(e) { document.getElementById('preview_code').textContent = "Error"; }
     }
 
+    function switchStats(type) {
+        currentStatsType = type;
+        document.getElementById('btn-ua').classList.toggle('active', type==='ua');
+        document.getElementById('btn-ip').classList.toggle('active', type==='ip');
+        loadStats();
+    }
+
     async function loadStats() {
-        const res = await (await fetch('/?action=getStats', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) })).json();
+        const res = await (await fetch('/?action=getStats', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash, type: currentStatsType }) })).json();
         if (res.success) { 
-            document.getElementById('total-req').innerText = `Total: ${res.total}`;
+            document.getElementById('total-req').innerText = 'Total: ' + res.total;
             renderStats(res.data, res.globalOverwrite); 
         }
     }
     
     function renderStats(data, isOverwriteEnabled) {
-        currentStatsData = data; currentIsOverwrite = isOverwriteEnabled;
         const container = document.getElementById('stats_tables'); container.innerHTML = '';
-        
-        const proxyClients = data.filter(i => /Clash|Mihomo|Stash|Shadowrocket|Surfboard|v2ray/i.test(i.label));
-        const browserClients = data.filter(i => !/Clash|Mihomo|Stash|Shadowrocket|Surfboard|v2ray/i.test(i.label));
-        
-        container.innerHTML += createStatsTable("🚀 代理客户端", proxyClients, true);
-        container.innerHTML += createStatsTable("🌐 浏览器 / 其他", browserClients, false);
-        
+        if(currentStatsType === 'ua') {
+            const proxyClients = data.filter(i => /Clash|Mihomo|Stash|Shadowrocket|Surfboard|v2ray/i.test(i.label));
+            const browserClients = data.filter(i => !/Clash|Mihomo|Stash|Shadowrocket|Surfboard|v2ray/i.test(i.label));
+            container.innerHTML += createStatsTable("🚀 代理客户端", proxyClients, true, isOverwriteEnabled);
+            container.innerHTML += createStatsTable("🌐 浏览器 / 其他", browserClients, false);
+        } else {
+            container.innerHTML += createStatsTable("📍 来源 IP", data, false);
+        }
         if (myChart) myChart.destroy();
         const ctx = document.getElementById('statsChart').getContext('2d');
-        const categoryMap = {};
-        data.forEach(item => {
-            let simple = "其他";
-            if (/Mozilla|Chrome|Safari|Edge/i.test(item.label) && !/Clash/i.test(item.label)) simple = "浏览器/非代理";
-            else if (/Clash|Mihomo/i.test(item.label)) simple = "Clash/Mihomo";
-            else if (/Shadowrocket/i.test(item.label)) simple = "Shadowrocket";
-            categoryMap[simple] = (categoryMap[simple] || 0) + item.count;
-        });
-        myChart = new Chart(ctx, { type: 'doughnut', data: { labels: Object.keys(categoryMap), datasets: [{ data: Object.values(categoryMap), backgroundColor: ['#36A2EB', '#FF6384', '#FFCE56', '#4BC0C0'] }] }, options: { maintainAspectRatio: false } });
+        const labels = data.slice(0,10).map(i=>i.label.substring(0,20));
+        const chartData = data.slice(0,10).map(i=>i.count);
+        myChart = new Chart(ctx, { type: 'doughnut', data: { labels, datasets: [{ data: chartData, backgroundColor: ['#36A2EB', '#FF6384', '#FFCE56', '#4BC0C0', '#9966FF'] }] } });
     }
 
-    function createStatsTable(title, items, showOverwrite) {
+    function createStatsTable(title, items, showOverwrite, isOverwriteEnabled) {
         if (items.length === 0) return '';
         items.sort((a, b) => statsSortKey === 'count' ? (statsSortAsc ? a.count - b.count : b.count - a.count) : (statsSortAsc ? a.label.localeCompare(b.label) : b.label.localeCompare(a.label)));
-        let html = \`<h6 class="mt-4">\${title}</h6><div class="table-responsive"><table class="table table-sm table-striped"><thead><tr><th onclick="toggleSort('ua')" style="cursor:pointer">UA ↕</th>\${showOverwrite?'<th>覆写状态</th>':''}<th onclick="toggleSort('count')" class="text-end" style="cursor:pointer">次数 ↕</th></tr></thead><tbody>\`;
+        let html = \`<h6 class="mt-4">\${title}</h6><div class="table-responsive"><table class="table table-sm table-striped"><thead><tr><th onclick="toggleSort('ua')" style="cursor:pointer">\${currentStatsType.toUpperCase()} ↕</th>\${showOverwrite?'<th>覆写状态</th>':''}<th onclick="toggleSort('count')" class="text-end" style="cursor:pointer">次数 ↕</th></tr></thead><tbody>\`;
         items.forEach(i => {
             let status = '';
-            if(showOverwrite) status = \`<td>\${(currentIsOverwrite) ? '<span class="badge bg-success">✅ 是</span>' : '<span class="badge bg-secondary">❌ 否</span>'}</td>\`;
+            if(showOverwrite) status = \`<td>\${(isOverwriteEnabled) ? '<span class="badge bg-success">✅ 是</span>' : '<span class="badge bg-secondary">❌ 否</span>'}</td>\`;
             html += \`<tr><td class="small text-break">\${i.label}</td>\${status}<td class="text-end">\${i.count}</td></tr>\`;
         });
         html += '</tbody></table></div>'; return html;
