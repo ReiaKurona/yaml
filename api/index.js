@@ -1,6 +1,6 @@
 /**
  * NextReia Clash Subscription Converter & Manager
- * Version: 6.5 (Smart Batch Import & Context Aware)
+ * Version: 6.5.1 (Syntax Fix & Smart Batch Import)
  */
 
 const yaml = require('js-yaml');
@@ -60,133 +60,140 @@ const DEFAULT_CONFIG = {
 };
 
 module.exports = async (req, res) => {
-    const { url: subUrl, action } = req.query;
-    const ua = req.headers['user-agent'] || 'Unknown';
-    const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0] : (req.socket.remoteAddress || 'Unknown');
+    try {
+        const { url: subUrl, action } = req.query;
+        const ua = req.headers['user-agent'] || 'Unknown';
+        const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0] : (req.socket.remoteAddress || 'Unknown');
 
-    // A. 统计逻辑
-    if (subUrl && !action) {
-        (async () => {
-            try {
-                const uaKey = `stat:ua:${Buffer.from(ua).toString('base64')}`;
-                await kv.incr(uaKey);
-                await kv.expire(uaKey, 86400);
-                const ipKey = `stat:ip:${clientIp}`;
-                await kv.incr(ipKey);
-                await kv.expire(ipKey, 86400);
-                await kv.incr('stat:total');
-            } catch (e) { console.error("Stats Error:", e); }
-        })();
-    }
-
-    // B. 管理 API
-    if (req.method === 'POST') {
-        const { authHash, newConfig, newPassword, previewUrl, type: statsType } = req.body;
-        const savedConfig = await kv.get('global_config');
-        const currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
-        const currentPwdHash = currentConfig.passwordHash || DEFAULT_PWD_HASH;
-
-        if (action === 'login') {
-            if (authHash === currentPwdHash) return res.json({ success: true, isDefaultPwd: currentPwdHash === DEFAULT_PWD_HASH });
-            return res.status(403).json({ success: false, msg: "密码错误" });
+        // A. 统计逻辑
+        if (subUrl && !action) {
+            (async () => {
+                try {
+                    const uaKey = `stat:ua:${Buffer.from(ua).toString('base64')}`;
+                    await kv.incr(uaKey);
+                    await kv.expire(uaKey, 86400);
+                    const ipKey = `stat:ip:${clientIp}`;
+                    await kv.incr(ipKey);
+                    await kv.expire(ipKey, 86400);
+                    await kv.incr('stat:total');
+                } catch (e) { console.error("Stats Error:", e); }
+            })();
         }
-        if (action === 'factoryReset') {
-            await kv.flushall();
-            return res.json({ success: true, msg: "♻️ 已恢复出厂设置，所有数据已清除" });
-        }
-        if (action === 'preview') {
+
+        // B. 管理 API
+        if (req.method === 'POST') {
+            const { authHash, newConfig, newPassword, previewUrl, type: statsType } = req.body;
+            const savedConfig = await kv.get('global_config');
+            const currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
+            const currentPwdHash = currentConfig.passwordHash || DEFAULT_PWD_HASH;
+
+            if (action === 'login') {
+                if (authHash === currentPwdHash) return res.json({ success: true, isDefaultPwd: currentPwdHash === DEFAULT_PWD_HASH });
+                return res.status(403).json({ success: false, msg: "密码错误" });
+            }
+            if (action === 'factoryReset') {
+                await kv.flushall();
+                return res.json({ success: true, msg: "♻️ 已恢复出厂设置，所有数据已清除" });
+            }
+            if (action === 'preview') {
+                if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
+                try {
+                    const previewRes = await generateConfig(previewUrl, "ClashMeta", currentConfig, true);
+                    return res.json({ success: true, data: previewRes });
+                } catch (e) { return res.json({ success: false, msg: "生成预览失败: " + e.message }); }
+            }
+            
             if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
-            try {
-                const previewRes = await generateConfig(previewUrl, "ClashMeta", currentConfig, true);
-                return res.json({ success: true, data: previewRes });
-            } catch (e) { return res.json({ success: false, msg: "生成预览失败: " + e.message }); }
-        }
-        
-        if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
 
-        if (action === 'saveConfig') {
-            const configToSave = { ...newConfig, passwordHash: currentPwdHash };
-            await kv.set('global_config', configToSave);
-            return res.json({ success: true, msg: "✅ 设置已保存" });
+            if (action === 'saveConfig') {
+                const configToSave = { ...newConfig, passwordHash: currentPwdHash };
+                await kv.set('global_config', configToSave);
+                return res.json({ success: true, msg: "✅ 设置已保存" });
+            }
+            if (action === 'resetConfig') {
+                const resetConfig = { ...DEFAULT_CONFIG, passwordHash: currentPwdHash, uiSettings: currentConfig.uiSettings };
+                await kv.set('global_config', resetConfig);
+                return res.json({ success: true, msg: "🔄 配置项已重置" });
+            }
+            if (action === 'clearStats') {
+                const keys = await kv.keys('stat:*');
+                if (keys.length > 0) await kv.del(...keys);
+                return res.json({ success: true, msg: "🧹 统计已清空" });
+            }
+            if (action === 'changePassword') {
+                if (!newPassword) return res.status(400).json({ msg: "无效密码" });
+                const configToSave = { ...currentConfig, passwordHash: newPassword };
+                await kv.set('global_config', configToSave);
+                return res.json({ success: true, msg: "密码修改成功" });
+            }
+            if (action === 'getStats') {
+                try {
+                    const reqType = statsType || 'ua';
+                    const matchPattern = reqType === 'ip' ? 'stat:ip:*' : 'stat:ua:*';
+                    const keys = await kv.keys(matchPattern);
+                    const total = await kv.get('stat:total') || 0;
+                    
+                    const stats = [];
+                    if (keys.length > 0) {
+                        const values = await kv.mget(...keys);
+                        keys.forEach((key, index) => {
+                            let label = key.replace(reqType === 'ip' ? 'stat:ip:' : 'stat:ua:', '');
+                            if (reqType === 'ua') {
+                                try { label = Buffer.from(label, 'base64').toString('utf-8'); } catch(e){ label = "Invalid Key"; }
+                            }
+                            stats.push({ label: label, count: parseInt(values[index] || 0) });
+                        });
+                    }
+                    return res.json({ success: true, data: stats, total: total, globalOverwrite: currentConfig.enableOverwrite });
+                } catch (e) { return res.json({ success: false, msg: e.message }); }
+            }
         }
-        if (action === 'resetConfig') {
-            const resetConfig = { ...DEFAULT_CONFIG, passwordHash: currentPwdHash, uiSettings: currentConfig.uiSettings };
-            await kv.set('global_config', resetConfig);
-            return res.json({ success: true, msg: "🔄 配置项已重置" });
-        }
-        if (action === 'clearStats') {
-            const keys = await kv.keys('stat:*');
-            if (keys.length > 0) await kv.del(...keys);
-            return res.json({ success: true, msg: "🧹 统计已清空" });
-        }
-        if (action === 'changePassword') {
-            if (!newPassword) return res.status(400).json({ msg: "无效密码" });
-            const configToSave = { ...currentConfig, passwordHash: newPassword };
-            await kv.set('global_config', configToSave);
-            return res.json({ success: true, msg: "密码修改成功" });
-        }
-        if (action === 'getStats') {
-            try {
-                const reqType = statsType || 'ua';
-                const matchPattern = reqType === 'ip' ? 'stat:ip:*' : 'stat:ua:*';
-                const keys = await kv.keys(matchPattern);
-                const total = await kv.get('stat:total') || 0;
-                
-                const stats = [];
-                if (keys.length > 0) {
-                    const values = await kv.mget(...keys);
-                    keys.forEach((key, index) => {
-                        let label = key.replace(reqType === 'ip' ? 'stat:ip:' : 'stat:ua:', '');
-                        if (reqType === 'ua') {
-                            try { label = Buffer.from(label, 'base64').toString('utf-8'); } catch(e){ label = "Invalid Key"; }
-                        }
-                        stats.push({ label: label, count: parseInt(values[index] || 0) });
-                    });
-                }
-                return res.json({ success: true, data: stats, total: total, globalOverwrite: currentConfig.enableOverwrite });
-            } catch (e) { return res.json({ success: false, msg: e.message }); }
-        }
-    }
 
-    // C. 返回 Web 界面
-    if (!subUrl) {
+        // C. 返回 Web 界面
+        if (!subUrl) {
+            const savedConfig = await kv.get('global_config');
+            const currentConfig = { 
+                ...DEFAULT_CONFIG, 
+                ...savedConfig,
+                dnsSettings: { ...DEFAULT_CONFIG.dnsSettings, ...(savedConfig?.dnsSettings || {}) },
+                uiSettings: { ...DEFAULT_CONFIG.uiSettings, ...(savedConfig?.uiSettings || {}) }
+            };
+            if (!currentConfig.customAppGroups) currentConfig.customAppGroups = [];
+            if (!currentConfig.customGlobalRules) currentConfig.customGlobalRules = [];
+            if (!currentConfig.groupOrder) currentConfig.groupOrder = [...DEFAULT_APP_NAMES];
+
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.send(renderAdminPage(currentConfig));
+        }
+
+        // D. 订阅生成
         const savedConfig = await kv.get('global_config');
-        const currentConfig = { 
-            ...DEFAULT_CONFIG, 
-            ...savedConfig,
-            dnsSettings: { ...DEFAULT_CONFIG.dnsSettings, ...(savedConfig?.dnsSettings || {}) },
-            uiSettings: { ...DEFAULT_CONFIG.uiSettings, ...(savedConfig?.uiSettings || {}) }
-        };
-        if (!currentConfig.customAppGroups) currentConfig.customAppGroups = [];
-        if (!currentConfig.customGlobalRules) currentConfig.customGlobalRules = [];
-        if (!currentConfig.groupOrder) currentConfig.groupOrder = [...DEFAULT_APP_NAMES];
+        const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
+        
+        const isClash = /clash|mihomo|stash/i.test(ua);
+        if (!isClash || !userConfig.enableOverwrite) {
+            const response = await axios.get(subUrl, { headers: { 'User-Agent': ua }, responseType: 'text', timeout: 10000 });
+            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+            if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
+            return res.send(response.data);
+        }
 
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        return res.send(renderAdminPage(currentConfig));
-    }
-
-    // D. 订阅生成
-    const savedConfig = await kv.get('global_config');
-    const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
-    
-    const isClash = /clash|mihomo|stash/i.test(ua);
-    if (!isClash || !userConfig.enableOverwrite) {
-        const response = await axios.get(subUrl, { headers: { 'User-Agent': ua }, responseType: 'text', timeout: 10000 });
-        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        const yamlResult = await generateConfig(subUrl, ua, userConfig, false);
+        
+        const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
         if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
-        return res.send(response.data);
+        
+        res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
+        res.send(yamlResult);
+
+    } catch (err) {
+        // Crash Protection
+        console.error("Crash:", err);
+        res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(`<h3>Server Error</h3><pre>${err.stack}</pre>`);
     }
+};
 
-    const yamlResult = await generateConfig(subUrl, ua, userConfig, false);
-    
-    const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
-    if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
-    
-    res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
-    res.send(yamlResult);
-}
-
-// === 辅助生成函数 ===
 async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
     if (!userConfig.customAppGroups) userConfig.customAppGroups = [];
     if (!userConfig.customGlobalRules) userConfig.customGlobalRules = [];
@@ -363,16 +370,10 @@ function renderAdminPage(config) {
                     <div class="tab-pane fade" id="edit-batch">
                         <div class="alert alert-info small p-2">
                             <strong>智能导入引擎</strong>：直接粘贴 Clash 配置文件中的 Rules 部分即可。
-                            <ul>
-                                <li>自动忽略注释 (<code>#</code>, <code>//</code>) 和行首 <code>-</code>。</li>
-                                <li>支持标准格式 (<code>DOMAIN,google.com,Proxy</code>) 或 简写格式。</li>
-                                <li><strong>注意：</strong>如果当前正在编辑【策略组规则】，导入的目标（如 Proxy）将被忽略，自动指向当前组。</li>
-                            </ul>
+                            <ul><li>支持标准格式或行首带 <code>-</code> 的 YAML 格式</li><li>自动忽略注释</li></ul>
                         </div>
-                        <textarea id="batch-rule-input" class="form-control" rows="12" placeholder="# 示例：
-- DOMAIN-SUFFIX, nicovideo.jp, Proxy
-DOMAIN-KEYWORD, bilibili, DIRECT, no-resolve"></textarea>
-                        <button class="btn btn-sm btn-primary mt-2" onclick="smartBatchImport()">⚡ 智能识别并导入</button>
+                        <textarea id="batch-rule-input" class="form-control" rows="12" placeholder="- DOMAIN-SUFFIX, nicovideo.jp, Proxy"></textarea>
+                        <button class="btn btn-sm btn-primary mt-2" onclick="smartBatchImport()">⚡ 智能导入</button>
                     </div>
                 </div>
                 <div id="modal-target-section" class="mt-3"><hr><h6>目标负载均衡组</h6><div id="modal-app-choices" class="checkbox-grid"></div></div>
@@ -538,50 +539,28 @@ DOMAIN-KEYWORD, bilibili, DIRECT, no-resolve"></textarea>
         document.getElementById('rule-list-container').appendChild(div);
     }
     
-    // --- SMART BATCH IMPORT ENGINE ---
+    // === SMART BATCH IMPORT LOGIC ===
     function smartBatchImport() {
         const text = document.getElementById('batch-rule-input').value;
-        const lines = text.split('\\n');
-        let count = 0;
-        
+        const lines = text.split('\\n'); let count = 0;
         lines.forEach(line => {
-            // 1. Cleanup: Remove comments, leading dashes, trim
             let cleanLine = line.trim();
             if(!cleanLine || cleanLine.startsWith('#') || cleanLine.startsWith('//')) return;
-            cleanLine = cleanLine.replace(/^-\s*/, ''); // Remove YAML list dash
-            
-            // 2. Split by comma
+            cleanLine = cleanLine.replace(/^-\s*/, '');
             const parts = cleanLine.split(',').map(s => s.trim());
-            
             if(parts.length >= 2) {
-                let type = parts[0].toUpperCase();
-                let value = parts[1];
+                let type = parts[0].toUpperCase(); let value = parts[1];
                 let noResolve = cleanLine.toLowerCase().includes('no-resolve');
                 let target = '';
-
-                // Simple Type Correction
-                if(type === 'DOMAINSUFFIX') type = 'DOMAIN-SUFFIX';
-                if(type === 'IPCIDR') type = 'IP-CIDR';
-
+                if(type === 'DOMAINSUFFIX') type = 'DOMAIN-SUFFIX'; if(type === 'IPCIDR') type = 'IP-CIDR';
                 if(ALL_RULE_TYPES.includes(type)) {
-                    // Context Aware Logic
-                    if(editingMode === 'global') {
-                        // Global mode: Try to get target from 3rd part
-                        if(parts.length > 2 && !parts[2].toLowerCase().includes('no-resolve')) {
-                            target = parts[2];
-                        }
-                    } else {
-                        // Group mode: Ignore target from text, it defaults to the group being edited
-                        target = '';
-                    }
-                    
-                    addRuleRow(type, value, target, noRes);
+                    if(editingMode === 'global') { if(parts.length > 2 && !parts[2].toLowerCase().includes('no-resolve')) target = parts[2]; }
+                    addRuleRow(type, value, target, noResolve);
                     count++;
                 }
             }
         });
-        
-        alert(\`成功识别并导入 \${count} 条规则！\`);
+        alert('成功识别并导入 ' + count + ' 条规则！');
         new bootstrap.Tab(document.querySelector('button[data-bs-target="#edit-visual"]')).show();
     }
 
@@ -771,7 +750,8 @@ DOMAIN-KEYWORD, bilibili, DIRECT, no-resolve"></textarea>
     }
 
     function toggleSort(key) {
-        if (statsSortKey === key) statsSortAsc = !statsSortAsc; else { statsSortKey = key; statsSortAsc = false; }
+        if (statsSortKey === key) statsSortAsc = !statsSortAsc;
+        else { statsSortKey = key; statsSortAsc = false; }
         renderStats(currentStatsData, currentIsOverwrite);
     }
 
