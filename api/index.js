@@ -1,6 +1,6 @@
 /**
  * NextReia Clash Subscription Converter & Manager
- * Version: 6.0 (IP Stats, Batch Import, Validation, Backup)
+ * Version: 6.1 (Debug Mode & Crash Protection)
  */
 
 const yaml = require('js-yaml');
@@ -30,7 +30,7 @@ const DEFAULT_CONFIG = {
     enableOverwrite: true,
     uiSettings: { backgroundImage: "" },
     lbGroups: [
-        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰" },
+        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰|IEPL" },
         { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
         { name: "🇨🇦 加拿大", regex: "CA|canada|🇨🇦" }
     ],
@@ -59,14 +59,48 @@ const DEFAULT_CONFIG = {
     healthCheckInterval: 120
 };
 
+// === 全局错误拦截 ===
 module.exports = async (req, res) => {
+    try {
+        await handleRequest(req, res);
+    } catch (err) {
+        console.error("Critical Runtime Error:", err);
+        res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(`
+            <div style="font-family:sans-serif; padding:2rem; color:#333;">
+                <h2 style="color:red;">🔴 严重错误 (Critical Error)</h2>
+                <p>程序运行崩溃。这通常是因为 <b>KV数据库未连接</b> 或 <b>依赖缺失</b> 导致的。</p>
+                <div style="background:#f8d7da; border:1px solid #f5c6cb; padding:15px; border-radius:5px; color:#721c24;">
+                    <strong>错误信息:</strong> ${err.message}
+                </div>
+                <pre style="background:#f8f9fa; padding:15px; border:1px solid #ddd; margin-top:15px; overflow:auto;">${err.stack}</pre>
+                <hr>
+                <h4>💡 如何修复?</h4>
+                <ol>
+                    <li>请检查 Vercel 后台 <b>Storage</b> 选项卡，确认是否已连接 <b>KV (Redis)</b> 数据库。</li>
+                    <li>如果是 "KV_URL is missing"，请重新点击 Connect 并 Redeploy。</li>
+                    <li>请检查 <code>package.json</code> 是否包含 <code>"@vercel/kv": "^1.0.1"</code>。</li>
+                </ol>
+            </div>
+        `);
+    }
+};
+
+// === 核心逻辑 ===
+async function handleRequest(req, res) {
     const { url: subUrl, action } = req.query;
     const ua = req.headers['user-agent'] || 'Unknown';
-    // 获取 IP，兼容 Vercel 代理头
-    const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0] : (req.socket.remoteAddress || 'Unknown');
+    // 安全获取 IP
+    let clientIp = 'Unknown';
+    if (req.headers['x-forwarded-for']) {
+        clientIp = req.headers['x-forwarded-for'].split(',')[0].trim();
+    } else if (req.socket && req.socket.remoteAddress) {
+        clientIp = req.socket.remoteAddress;
+    }
 
-    // A. 统计逻辑 (UA + IP + Total)
+    // A. 统计逻辑
     if (subUrl && !action) {
+        // 不阻塞主线程
         (async () => {
             try {
                 // 1. UA 统计
@@ -79,9 +113,12 @@ module.exports = async (req, res) => {
                 await kv.incr(ipKey);
                 await kv.expire(ipKey, 86400);
 
-                // 3. 总数统计 (永不过期或更长时间)
+                // 3. 总数统计
                 await kv.incr('stat:total');
-            } catch (e) { console.error("Stats Error:", e); }
+            } catch (e) { 
+                // 忽略统计错误，防止影响订阅下发，但在日志记录
+                console.warn("Stats logging failed (Non-critical):", e.message); 
+            }
         })();
     }
 
@@ -111,7 +148,6 @@ module.exports = async (req, res) => {
             } catch (e) { return res.json({ success: false, msg: "生成预览失败: " + e.message }); }
         }
         
-        // Auth check for others
         if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
 
         if (action === 'saveConfig') {
@@ -135,7 +171,6 @@ module.exports = async (req, res) => {
             await kv.set('global_config', configToSave);
             return res.json({ success: true, msg: "密码修改成功" });
         }
-        // Stats API (Supports switching type)
         if (action === 'getStats') {
             try {
                 const type = req.body.type || 'ua'; // 'ua' or 'ip'
@@ -148,7 +183,6 @@ module.exports = async (req, res) => {
                     const values = await kv.mget(...keys);
                     keys.forEach((key, index) => {
                         let label = key.replace(type === 'ip' ? 'stat:ip:' : 'stat:ua:', '');
-                        // UA needs base64 decode
                         if (type === 'ua') {
                             try { label = Buffer.from(label, 'base64').toString('utf-8'); } catch(e){ label = "Invalid Key"; }
                         }
@@ -178,31 +212,27 @@ module.exports = async (req, res) => {
     }
 
     // D. 订阅生成
-    try {
-        const savedConfig = await kv.get('global_config');
-        const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
-        
-        const isClash = /clash|mihomo|stash/i.test(ua);
-        if (!isClash || !userConfig.enableOverwrite) {
-            const response = await axios.get(subUrl, { headers: { 'User-Agent': ua }, responseType: 'text', timeout: 10000 });
-            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-            if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
-            return res.send(response.data);
-        }
-
-        const yamlResult = await generateConfig(subUrl, ua, userConfig, false);
-        
-        const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
+    const savedConfig = await kv.get('global_config');
+    const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
+    
+    const isClash = /clash|mihomo|stash/i.test(ua);
+    if (!isClash || !userConfig.enableOverwrite) {
+        const response = await axios.get(subUrl, { headers: { 'User-Agent': ua }, responseType: 'text', timeout: 10000 });
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
-        
-        res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
-        res.send(yamlResult);
-
-    } catch (err) {
-        res.status(500).send(`Error: ${err.message}`);
+        return res.send(response.data);
     }
-};
 
+    const yamlResult = await generateConfig(subUrl, ua, userConfig, false);
+    
+    const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
+    if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
+    
+    res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
+    res.send(yamlResult);
+}
+
+// === 辅助生成函数 ===
 async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
     if (!userConfig.customAppGroups) userConfig.customAppGroups = [];
     if (!userConfig.customGlobalRules) userConfig.customGlobalRules = [];
@@ -290,7 +320,7 @@ function renderAdminPage(config) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NextReia V6.0</title>
+    <title>NextReia Pro V6.1</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
@@ -315,7 +345,6 @@ function renderAdminPage(config) {
         .sort-handle { cursor: grab; color: #adb5bd; padding: 5px; font-size: 1.2rem; touch-action: none; }
         .badge-proxy { background-color: #0d6efd; }
         .badge-browser { background-color: #6c757d; }
-        /* Fix Checkbox Grid overflow */
         .checkbox-grid { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; width: 100%; }
         .checkbox-grid .form-check { margin: 0; }
         #modal-app-choices { max-height: 200px; overflow-y: auto; padding: 10px; border: 1px solid var(--bs-border-color); border-radius: 5px; }
@@ -362,7 +391,6 @@ function renderAdminPage(config) {
     </div>
 </div>
 
-<!-- Rule Modal with Tabs -->
 <div class="modal fade" id="ruleModal" tabindex="-1">
     <div class="modal-dialog modal-xl">
         <div class="modal-content">
@@ -378,9 +406,9 @@ function renderAdminPage(config) {
                         <button class="btn btn-sm btn-outline-success mt-2" onclick="addRuleRow()">+ 新增规则</button>
                     </div>
                     <div class="tab-pane fade" id="edit-batch">
-                        <div class="alert alert-secondary small p-2">格式：<code>类型,内容,目标(可选),no-resolve(可选)</code>，一行一条。<br>例如：<code>DOMAIN-SUFFIX,google.com</code> 或 <code>IP-CIDR,1.1.1.1/32,MyGroup,no-resolve</code></div>
-                        <textarea id="batch-rule-input" class="form-control" rows="10" placeholder="在此粘贴 Clash 规则..."></textarea>
-                        <button class="btn btn-sm btn-info mt-2" onclick="batchImport()">识别并导入到可视化编辑器</button>
+                        <div class="alert alert-secondary small p-2">格式：<code>类型,内容,目标(可选),no-resolve(可选)</code>，一行一条。</div>
+                        <textarea id="batch-rule-input" class="form-control" rows="10" placeholder="DOMAIN-SUFFIX,google.com,MyGroup"></textarea>
+                        <button class="btn btn-sm btn-info mt-2" onclick="batchImport()">识别并导入</button>
                     </div>
                 </div>
                 <div id="modal-target-section" class="mt-3"><hr><h6>目标负载均衡组</h6><div id="modal-app-choices" class="checkbox-grid"></div></div>
@@ -403,7 +431,7 @@ function renderAdminPage(config) {
 
 <div class="container" id="main-app" style="max-width:950px">
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="fw-bold">🛠️ NextReia Pro V6</h3>
+        <h3 class="fw-bold">🛠️ NextReia Pro V6.1</h3>
         <div><button class="btn btn-outline-secondary btn-sm me-2" onclick="showChangePwd(false)">修改密码</button><button class="btn btn-danger btn-sm" onclick="doLogout()">退出</button></div>
     </div>
 
@@ -429,8 +457,15 @@ function renderAdminPage(config) {
                 <div class="card-header text-info bg-body-tertiary d-flex align-items-center">4. DNS 覆写设置</div>
                 <div class="card-body">
                     <div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" id="dns_enable" ${dnsDisplay.enable ? 'checked' : ''}><label class="form-check-label fw-bold">启用</label></div>
-                    <!-- DNS Fields omitted for brevity, same as V5.1 -->
-                    <div class="row g-3"><div class="col-md-6"><label class="form-label small">IPv6</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_ipv6" ${dnsDisplay.ipv6 ? 'checked' : ''}></div></div><div class="col-md-6"><label class="form-label small">Enhanced Mode</label><select id="dns_enhanced" class="form-select form-select-sm"><option value="fake-ip" ${dnsDisplay['enhanced-mode'] === 'fake-ip' ? 'selected' : ''}>fake-ip</option><option value="redir-host" ${dnsDisplay['enhanced-mode'] === 'redir-host' ? 'selected' : ''}>redir-host</option></select></div><div class="col-md-6"><label class="form-label small">Fake-IP Range</label><input type="text" id="dns_fakeip" class="form-control form-control-sm" value="${dnsDisplay['fake-ip-range']}"></div><div class="col-md-6"><label class="form-label small">Use Hosts</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_hosts" ${dnsDisplay['use-hosts'] ? 'checked' : ''}></div></div><div class="col-12"><label class="form-label small">Default Nameserver</label><textarea id="dns_default_ns" class="form-control" rows="2">${dnsDisplay.defaultNameserver}</textarea></div><div class="col-12"><label class="form-label small">Nameserver</label><textarea id="dns_ns" class="form-control" rows="3">${dnsDisplay.nameserver}</textarea></div><div class="col-12"><label class="form-label small">Fallback</label><textarea id="dns_fallback" class="form-control" rows="3">${dnsDisplay.fallback}</textarea></div><div class="col-12"><hr><h6>Fallback Filter</h6></div><div class="col-md-4"><label class="form-label small">GeoIP</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_geoip" ${dnsDisplay['fallback-filter'].geoip ? 'checked' : ''}></div></div><div class="col-md-8"><label class="form-label small">IP CIDR</label><textarea id="dns_ipcidr" class="form-control" rows="2">${dnsDisplay.ipcidr}</textarea></div><div class="col-12"><label class="form-label small">Domain</label><textarea id="dns_domain" class="form-control" rows="3">${dnsDisplay.domain}</textarea></div></div>
+                    <div class="row g-3">
+                        <div class="col-md-6"><label class="form-label small">IPv6</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_ipv6" ${dnsDisplay.ipv6 ? 'checked' : ''}></div></div>
+                        <div class="col-md-6"><label class="form-label small">Enhanced Mode</label><select id="dns_enhanced" class="form-select form-select-sm"><option value="fake-ip" ${dnsDisplay['enhanced-mode'] === 'fake-ip' ? 'selected' : ''}>fake-ip</option><option value="redir-host" ${dnsDisplay['enhanced-mode'] === 'redir-host' ? 'selected' : ''}>redir-host</option></select></div>
+                        <div class="col-md-6"><label class="form-label small">Fake-IP Range</label><input type="text" id="dns_fakeip" class="form-control form-control-sm" value="${dnsDisplay['fake-ip-range']}"></div><div class="col-md-6"><label class="form-label small">Use Hosts</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_hosts" ${dnsDisplay['use-hosts'] ? 'checked' : ''}></div></div>
+                        <div class="col-12"><label class="form-label small">Default Nameserver</label><textarea id="dns_default_ns" class="form-control" rows="2">${dnsDisplay.defaultNameserver}</textarea></div>
+                        <div class="col-12"><label class="form-label small">Nameserver</label><textarea id="dns_ns" class="form-control" rows="3">${dnsDisplay.nameserver}</textarea></div>
+                        <div class="col-12"><label class="form-label small">Fallback</label><textarea id="dns_fallback" class="form-control" rows="3">${dnsDisplay.fallback}</textarea></div>
+                        <div class="col-12"><hr><h6>Fallback Filter</h6></div><div class="col-md-4"><label class="form-label small">GeoIP</label><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="dns_geoip" ${dnsDisplay['fallback-filter'].geoip ? 'checked' : ''}></div></div><div class="col-md-8"><label class="form-label small">IP CIDR</label><textarea id="dns_ipcidr" class="form-control" rows="2">${dnsDisplay.ipcidr}</textarea></div><div class="col-12"><label class="form-label small">Domain</label><textarea id="dns_domain" class="form-control" rows="3">${dnsDisplay.domain}</textarea></div>
+                    </div>
                 </div>
             </div>
             <div class="card"><div class="card-header text-secondary bg-body-tertiary">5. 高级设置</div><div class="card-body"><button class="btn btn-outline-dark w-100 mb-3" onclick="openGlobalRuleEditor()">🌐 编辑全局/预置规则</button><div class="mb-3 row align-items-center"><label class="col-sm-4 col-form-label">健康检查间隔 (秒)</label><div class="col-sm-4"><input type="number" id="interval" class="form-control" value="${config.healthCheckInterval || 120}" min="60"></div></div><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="unmatched" ${config.includeUnmatched ? 'checked' : ''}><label class="form-check-label">未匹配节点放入 ReiaNEXT</label></div></div></div>
@@ -439,7 +474,7 @@ function renderAdminPage(config) {
 
         <div class="tab-pane fade" id="ui-pane">
             <div class="card"><div class="card-header">🎨 个性化</div><div class="card-body"><div class="mb-3"><label class="form-label">背景图片 URL</label><input type="text" id="bg_image" class="form-control" placeholder="https://..." value="${ui.backgroundImage}"></div><button class="btn btn-primary" onclick="save()">保存界面设置</button></div></div>
-            <div class="card"><div class="card-header bg-info-subtle">💾 备份与还原</div><div class="card-body"><div class="d-flex gap-2"><button class="btn btn-outline-primary" onclick="exportSettings()">📤 导出配置文件 (.json)</button><button class="btn btn-outline-success" onclick="document.getElementById('file_import').click()">📥 导入配置文件</button><input type="file" id="file_import" accept=".json" style="display:none" onchange="importSettings(this)"></div></div></div>
+            <div class="card"><div class="card-header bg-info-subtle">💾 备份与还原</div><div class="card-body"><div class="d-flex gap-2"><button class="btn btn-outline-primary" onclick="exportSettings()">📤 导出</button><button class="btn btn-outline-success" onclick="document.getElementById('file_import').click()">📥 导入</button><input type="file" id="file_import" accept=".json" style="display:none" onchange="importSettings(this)"></div></div></div>
             <div class="card border-danger"><div class="card-header text-danger">🧨 危险区域</div><div class="card-body"><button class="btn btn-danger w-100" onclick="factoryReset()">恢复出厂设置</button></div></div>
         </div>
 
@@ -448,13 +483,7 @@ function renderAdminPage(config) {
         </div>
 
         <div class="tab-pane fade" id="stats-pane">
-            <div class="card"><div class="card-header bg-body-tertiary d-flex justify-content-between align-items-center">
-                <span>📊 统计 <span id="total-req" class="badge bg-secondary ms-2"></span></span>
-                <div>
-                    <div class="btn-group me-2" role="group"><button type="button" class="btn btn-sm btn-outline-primary active" id="btn-ua" onclick="switchStats('ua')">UA视图</button><button type="button" class="btn btn-sm btn-outline-primary" id="btn-ip" onclick="switchStats('ip')">IP视图</button></div>
-                    <button class="btn btn-sm btn-outline-danger me-2" onclick="clearStats()">清空</button><button class="btn btn-sm btn-outline-secondary" onclick="loadStats()">刷新</button>
-                </div>
-            </div><div class="card-body"><div class="chart-container d-flex justify-content-center"><canvas id="statsChart"></canvas></div><div id="stats_tables"></div></div></div>
+            <div class="card"><div class="card-header bg-body-tertiary d-flex justify-content-between align-items-center"><span>📊 统计 <span id="total-req" class="badge bg-secondary ms-2"></span></span><div><div class="btn-group me-2" role="group"><button type="button" class="btn btn-sm btn-outline-primary active" id="btn-ua" onclick="switchStats('ua')">UA视图</button><button type="button" class="btn btn-sm btn-outline-primary" id="btn-ip" onclick="switchStats('ip')">IP视图</button></div><button class="btn btn-sm btn-outline-danger me-2" onclick="clearStats()">清空</button><button class="btn btn-sm btn-outline-secondary" onclick="loadStats()">刷新</button></div></div><div class="card-body"><div class="chart-container d-flex justify-content-center"><canvas id="statsChart"></canvas></div><div id="stats_tables"></div></div></div>
         </div>
     </div>
 </div>
@@ -470,12 +499,13 @@ function renderAdminPage(config) {
     const ALL_RULE_TYPES = ${JSON.stringify(ALL_RULE_TYPES)};
     const BUILT_IN_POLICIES = ${JSON.stringify(BUILT_IN_POLICIES)};
     let editingMode = null; let editingGroupName = null; let myChart = null;
-    let currentStatsType = 'ua';
+    let currentStatsType = 'ua'; let statsSortKey = 'count'; let statsSortAsc = false;
+    let currentStatsData = []; let currentIsOverwrite = true;
 
     if(authTokenHash) { document.getElementById('login-overlay').style.display = 'none'; document.getElementById('main-app').classList.add('active'); renderUI(); }
     function hash(str) { return CryptoJS.SHA256(str).toString(CryptoJS.enc.Hex); }
 
-    // --- Login & Main Logic ---
+    // --- Login & Reset ---
     async function doLogin() {
         const pwd = document.getElementById('login_pwd').value; const pwdHash = hash(pwd);
         try {
@@ -485,13 +515,10 @@ function renderAdminPage(config) {
     }
     document.getElementById('login_pwd').addEventListener('keypress', e => e.key === 'Enter' && doLogin());
     function doLogout() { sessionStorage.removeItem('authHash'); location.reload(); }
+    async function factoryReset() { if(!confirm("⚠️ 严重警告：彻底清除所有数据？")) return; await fetch('/?action=factoryReset', { method: 'POST' }); alert("已重置"); location.reload(); }
+    async function resetConfig() { if(!confirm("仅重置配置？")) return; await fetch('/?action=resetConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) }); alert("已重置"); location.reload(); }
 
-    function renderUI() {
-        document.getElementById('lb_area').innerHTML = ''; config.lbGroups.forEach(val => addLB(val));
-        renderSortableGroups(); renderAppGroups();
-    }
-
-    // --- Sortable Groups ---
+    function renderUI() { document.getElementById('lb_area').innerHTML = ''; config.lbGroups.forEach(val => addLB(val)); renderSortableGroups(); renderAppGroups(); }
     function renderSortableGroups() {
         const list = document.getElementById('sortable-groups'); list.innerHTML = '';
         config.groupOrder.forEach(name => {
@@ -511,30 +538,21 @@ function renderAdminPage(config) {
         const grp = config.customAppGroups.find(g => g.name === oldName); if (grp) grp.name = newName; renderSortableGroups(); renderAppGroups();
     }
 
-    // --- Validation ---
     function validateRule(type, value) {
         if (!value) return false;
-        if (type.startsWith('IP-CIDR')) {
-            // Simple CIDR check: IP/Mask
-            return /^(\\d{1,3}\\.){3}\\d{1,3}(\\/\\d{1,2})?$/.test(value) || /^[0-9a-fA-F:]+(\\/\\d{1,3})?$/.test(value);
-        }
-        if (type.startsWith('DOMAIN')) {
-            // Basic Domain check
-            return /^[a-zA-Z0-9-.*]+$/.test(value);
-        }
+        if (type.startsWith('IP-CIDR') || type.startsWith('SRC-IP-CIDR')) return /^(\\d{1,3}\\.){3}\\d{1,3}(\\/\\d{1,2})?$/.test(value) || /^[0-9a-fA-F:]+(\\/\\d{1,3})?$/.test(value);
+        if (type.startsWith('DOMAIN')) return /^[a-zA-Z0-9-.*]+$/.test(value);
         return true;
     }
 
-    // --- Rule Editor & Batch Import ---
     const ruleModal = new bootstrap.Modal(document.getElementById('ruleModal'));
     function openRuleEditor(mode, groupName) {
         editingMode = mode; editingGroupName = groupName;
         document.getElementById('rule-list-container').innerHTML = ''; document.getElementById('batch-rule-input').value = '';
         const targetSection = document.getElementById('modal-target-section');
         let rules = [];
-        if (mode === 'global') {
-            document.getElementById('ruleModalTitle').innerText = "全局/预置规则"; rules = config.customGlobalRules || []; targetSection.style.display = 'none';
-        } else {
+        if (mode === 'global') { document.getElementById('ruleModalTitle').innerText = "全局/预置规则"; rules = config.customGlobalRules || []; targetSection.style.display = 'none'; }
+        else {
             document.getElementById('ruleModalTitle').innerText = groupName; const grp = config.customAppGroups.find(g => g.name === groupName); rules = grp ? (grp.rules || []) : []; targetSection.style.display = 'block';
             const appChoiceContainer = document.getElementById('modal-app-choices'); appChoiceContainer.innerHTML = '';
             const targets = grp ? (grp.targetLBs || []) : [];
@@ -559,46 +577,33 @@ function renderAdminPage(config) {
     
     function batchImport() {
         const text = document.getElementById('batch-rule-input').value;
-        const lines = text.split('\\n');
-        let count = 0;
+        const lines = text.split('\\n'); let count = 0;
         lines.forEach(line => {
             const parts = line.split(',').map(s => s.trim());
             if (parts.length >= 2) {
-                const type = parts[0].toUpperCase();
-                const val = parts[1];
+                const type = parts[0].toUpperCase(); const val = parts[1];
                 const target = parts.length > 2 && !parts[2].includes('no-resolve') ? parts[2] : '';
                 const noRes = line.includes('no-resolve');
-                if (ALL_RULE_TYPES.includes(type)) {
-                    addRuleRow(type, val, target, noRes);
-                    count++;
-                }
+                if (ALL_RULE_TYPES.includes(type)) { addRuleRow(type, val, target, noRes); count++; }
             }
         });
-        alert(\`已导入 \${count} 条规则\`);
+        alert(\`已导入 \${count} 条\`);
         new bootstrap.Tab(document.querySelector('button[data-bs-target="#edit-visual"]')).show();
     }
 
     function saveRulesFromModal() {
-        const rows = document.querySelectorAll('.rule-row');
-        const newRules = [];
-        let hasError = false;
-        
+        const rows = document.querySelectorAll('.rule-row'); const newRules = []; let hasError = false;
         rows.forEach(row => {
-            const t = row.querySelector('.rule-type').value;
-            const v = row.querySelector('.rule-value').value;
-            if(!validateRule(t, v)) {
-                row.querySelector('.rule-value').classList.add('is-invalid');
-                hasError = true;
-            } else {
+            const t = row.querySelector('.rule-type').value; const v = row.querySelector('.rule-value').value;
+            if(!validateRule(t, v)) { row.querySelector('.rule-value').classList.add('is-invalid'); hasError = true; } 
+            else {
                 row.querySelector('.rule-value').classList.remove('is-invalid');
                 const r = { type: t, value: v, noResolve: row.querySelector('.rule-no-resolve').checked };
                 if (editingMode === 'global') r.target = row.querySelector('.rule-target').value;
                 newRules.push(r);
             }
         });
-        
-        if(hasError) return alert("部分规则格式错误(标红)，请检查");
-
+        if(hasError) return alert("规则校验失败");
         if (editingMode === 'global') { config.customGlobalRules = newRules; } 
         else {
             const targets = Array.from(document.querySelectorAll('.modal-target-chk:checked')).map(i => i.value);
@@ -628,37 +633,25 @@ function renderAdminPage(config) {
     function getLBNames() { const names = []; document.querySelectorAll('.lb-n').forEach(i => { if(i.value) names.push(i.value); }); return names.length > 0 ? names : config.lbGroups.map(g => g.name); }
     function addLB(val = {name:'', regex:''}) { const div = document.createElement('div'); div.className = 'input-group mb-2 lb-item'; div.innerHTML = \`<input type="text" class="form-control lb-n" value="\${val.name}"><input type="text" class="form-control lb-r" value="\${val.regex}"><button class="btn btn-danger" onclick="this.parentElement.remove(); renderAppGroups();">×</button>\`; document.getElementById('lb_area').appendChild(div); }
 
-    // --- Backup/Restore ---
     function exportSettings() {
         const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(config));
-        const downloadAnchorNode = document.createElement('a');
-        downloadAnchorNode.setAttribute("href", dataStr);
-        downloadAnchorNode.setAttribute("download", "nextreia_backup.json");
-        document.body.appendChild(downloadAnchorNode);
-        downloadAnchorNode.click();
-        downloadAnchorNode.remove();
+        const a = document.createElement('a'); a.setAttribute("href", dataStr); a.setAttribute("download", "nextreia_backup.json"); document.body.appendChild(a); a.click(); a.remove();
     }
     function importSettings(input) {
-        const file = input.files[0];
-        if(!file) return;
+        const file = input.files[0]; if(!file) return;
         const reader = new FileReader();
         reader.onload = async function(e) {
             try {
                 const imported = JSON.parse(e.target.result);
-                // Basic Validation
-                if(!imported.lbGroups || !imported.appGroups) throw new Error("无效的配置文件");
-                // Restore logic
-                const newConfig = { ...config, ...imported, passwordHash: config.passwordHash }; // Preserve password
+                if(!imported.lbGroups) throw new Error("Format Error");
+                const newConfig = { ...config, ...imported, passwordHash: config.passwordHash };
                 await fetch('/?action=saveConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash, newConfig }) });
-                alert("导入成功，即将刷新");
-                location.reload();
-            } catch(err) { alert("导入失败: " + err.message); }
-        };
-        reader.readAsText(file);
+                alert("导入成功"); location.reload();
+            } catch(err) { alert("导入失败"); }
+        }; reader.readAsText(file);
     }
 
     async function save() {
-        // Collect LB
         const lbGroups = Array.from(document.querySelectorAll('.lb-item')).map(el => ({ name: el.querySelector('.lb-n').value, regex: el.querySelector('.lb-r').value })).filter(i=>i.name);
         const appGroups = {}; const updatedCustomGroups = [...config.customAppGroups];
         document.querySelectorAll('.app-row').forEach(row => {
@@ -698,7 +691,6 @@ function renderAdminPage(config) {
         } catch(e) { document.getElementById('preview_code').textContent = "Error"; }
     }
 
-    // Stats Switch
     function switchStats(type) {
         currentStatsType = type;
         document.getElementById('btn-ua').classList.toggle('active', type==='ua');
@@ -724,8 +716,6 @@ function renderAdminPage(config) {
         } else {
             container.innerHTML += createStatsTable("📍 来源 IP", data, false);
         }
-        
-        // Chart
         if (myChart) myChart.destroy();
         const ctx = document.getElementById('statsChart').getContext('2d');
         const labels = data.slice(0,10).map(i=>i.label.substring(0,20));
@@ -735,7 +725,8 @@ function renderAdminPage(config) {
 
     function createStatsTable(title, items, showOverwrite, isOverwriteEnabled) {
         if (items.length === 0) return '';
-        let html = \`<h6 class="mt-4">\${title}</h6><div class="table-responsive"><table class="table table-sm table-striped"><thead><tr><th>\${currentStatsType.toUpperCase()}</th>\${showOverwrite?'<th>覆写状态</th>':''}<th>次数</th></tr></thead><tbody>\`;
+        items.sort((a, b) => statsSortKey === 'count' ? (statsSortAsc ? a.count - b.count : b.count - a.count) : (statsSortAsc ? a.label.localeCompare(b.label) : b.label.localeCompare(a.label)));
+        let html = \`<h6 class="mt-4">\${title}</h6><div class="table-responsive"><table class="table table-sm table-striped"><thead><tr><th onclick="toggleSort('ua')" style="cursor:pointer">\${currentStatsType.toUpperCase()} ↕</th>\${showOverwrite?'<th>覆写状态</th>':''}<th onclick="toggleSort('count')" class="text-end" style="cursor:pointer">次数 ↕</th></tr></thead><tbody>\`;
         items.forEach(i => {
             let status = '';
             if(showOverwrite) status = \`<td>\${(isOverwriteEnabled) ? '<span class="badge bg-success">✅ 是</span>' : '<span class="badge bg-secondary">❌ 否</span>'}</td>\`;
@@ -744,9 +735,13 @@ function renderAdminPage(config) {
         html += '</tbody></table></div>'; return html;
     }
 
+    function toggleSort(key) {
+        if (statsSortKey === key) statsSortAsc = !statsSortAsc;
+        else { statsSortKey = key; statsSortAsc = false; }
+        renderStats(currentStatsData, currentIsOverwrite);
+    }
+
     async function clearStats() { if(!confirm("清空统计？")) return; await fetch('/?action=clearStats', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) }); loadStats(); }
-    async function factoryReset() { if(!confirm("⚠️ 危险：彻底清除数据？")) return; await fetch('/?action=factoryReset', { method: 'POST' }); alert("已重置"); location.reload(); }
-    async function resetConfig() { if(!confirm("仅重置配置？")) return; await fetch('/?action=resetConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) }); alert("配置已重置"); location.reload(); }
     function showChangePwd(forced) { const m = document.getElementById('pwd-overlay'); m.style.display = 'flex'; document.getElementById('pwd-close-btn').style.display = forced ? 'none' : 'block'; m.onclick = forced ? null : ((e) => { if(e.target===m) closePwdModal() }); document.getElementById('pwd-warning').style.display = forced ? 'block' : 'none'; }
     function closePwdModal() { document.getElementById('pwd-overlay').style.display = 'none'; }
     async function changePassword() { const p1 = document.getElementById('new_pwd').value, p2 = document.getElementById('confirm_pwd').value; if(p1.length<5 || p1!==p2) return alert("无效"); const res = await (await fetch('/?action=changePassword', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash, newPassword: hash(p1) }) })).json(); if(res.success) { alert("成功"); location.reload(); } else { alert(res.msg); } }
