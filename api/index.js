@@ -1,6 +1,6 @@
 /**
  * NextReia Clash Subscription Converter & Manager
- * Version: 6.3 (UI Empty State Fix)
+ * Version: 6.4 (IP Geolocation, ASN, Custom Source)
  */
 
 const yaml = require('js-yaml');
@@ -28,7 +28,12 @@ const BUILT_IN_POLICIES = ["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBL
 const DEFAULT_CONFIG = {
     passwordHash: DEFAULT_PWD_HASH,
     enableOverwrite: true,
-    uiSettings: { backgroundImage: "" },
+    // 新增 ipApiSource 和 customIpApiUrl
+    uiSettings: { 
+        backgroundImage: "",
+        ipApiSource: "ipapi.co", // 默认使用支持 HTTPS 的源
+        customIpApiUrl: "" 
+    },
     lbGroups: [
         { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰|IEPL" },
         { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
@@ -59,18 +64,7 @@ const DEFAULT_CONFIG = {
     healthCheckInterval: 120
 };
 
-// 全局错误捕获
 module.exports = async (req, res) => {
-    try {
-        await handleRequest(req, res);
-    } catch (err) {
-        console.error("Runtime Error:", err);
-        res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.send(`<div style="padding:20px;font-family:sans-serif;"><h3>🔴 服务端错误</h3><p>请检查 KV 数据库连接或依赖安装。</p><pre style="background:#eee;padding:10px;">${err.stack}</pre></div>`);
-    }
-};
-
-async function handleRequest(req, res) {
     const { url: subUrl, action } = req.query;
     const ua = req.headers['user-agent'] || 'Unknown';
     const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0] : (req.socket.remoteAddress || 'Unknown');
@@ -88,7 +82,7 @@ async function handleRequest(req, res) {
                 await kv.expire(ipKey, 86400);
 
                 await kv.incr('stat:total');
-            } catch (e) { console.error("Stats Error (Non-blocking):", e.message); }
+            } catch (e) { console.error("Stats Error:", e); }
         })();
     }
 
@@ -99,17 +93,14 @@ async function handleRequest(req, res) {
         const currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
         const currentPwdHash = currentConfig.passwordHash || DEFAULT_PWD_HASH;
 
-        // Login
         if (action === 'login') {
             if (authHash === currentPwdHash) return res.json({ success: true, isDefaultPwd: currentPwdHash === DEFAULT_PWD_HASH });
             return res.status(403).json({ success: false, msg: "密码错误" });
         }
-        // Factory Reset
         if (action === 'factoryReset') {
             await kv.flushall();
-            return res.json({ success: true, msg: "♻️ 已恢复出厂设置" });
+            return res.json({ success: true, msg: "♻️ 已恢复出厂设置，所有数据已清除" });
         }
-        // Preview
         if (action === 'preview') {
             if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
             try {
@@ -118,7 +109,6 @@ async function handleRequest(req, res) {
             } catch (e) { return res.json({ success: false, msg: "生成预览失败: " + e.message }); }
         }
         
-        // Auth check
         if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
 
         if (action === 'saveConfig') {
@@ -174,6 +164,7 @@ async function handleRequest(req, res) {
             dnsSettings: { ...DEFAULT_CONFIG.dnsSettings, ...(savedConfig?.dnsSettings || {}) },
             uiSettings: { ...DEFAULT_CONFIG.uiSettings, ...(savedConfig?.uiSettings || {}) }
         };
+        // 兼容性
         if (!currentConfig.customAppGroups) currentConfig.customAppGroups = [];
         if (!currentConfig.customGlobalRules) currentConfig.customGlobalRules = [];
         if (!currentConfig.groupOrder) currentConfig.groupOrder = [...DEFAULT_APP_NAMES];
@@ -268,7 +259,7 @@ async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
 
 function renderAdminPage(config) {
     const dns = config.dnsSettings || DEFAULT_CONFIG.dnsSettings;
-    const ui = config.uiSettings || { backgroundImage: "" };
+    const ui = config.uiSettings || { backgroundImage: "", ipApiSource: "ipapi.co", customIpApiUrl: "" };
     
     const dnsDisplay = {
         ...dns,
@@ -291,7 +282,7 @@ function renderAdminPage(config) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NextReia Pro V6.3</title>
+    <title>NextReia Pro V6.4</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
@@ -403,7 +394,7 @@ function renderAdminPage(config) {
 
 <div class="container" id="main-app" style="max-width:950px">
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="fw-bold">🛠️ NextReia Pro V6.3</h3>
+        <h3 class="fw-bold">🛠️ NextReia Pro V6.4</h3>
         <div><button class="btn btn-outline-secondary btn-sm me-2" onclick="showChangePwd(false)">修改密码</button><button class="btn btn-danger btn-sm" onclick="doLogout()">退出</button></div>
     </div>
 
@@ -445,7 +436,21 @@ function renderAdminPage(config) {
         </div>
 
         <div class="tab-pane fade" id="ui-pane">
-            <div class="card"><div class="card-header">🎨 个性化</div><div class="card-body"><div class="mb-3"><label class="form-label">背景图片 URL</label><input type="text" id="bg_image" class="form-control" placeholder="https://..." value="${ui.backgroundImage}"></div><button class="btn btn-primary" onclick="save()">保存界面设置</button></div></div>
+            <div class="card"><div class="card-header">🎨 个性化</div><div class="card-body">
+                <div class="mb-3"><label class="form-label">背景图片 URL</label><input type="text" id="bg_image" class="form-control" placeholder="https://..." value="${ui.backgroundImage}"></div>
+                <hr>
+                <h6 class="mb-3">IP 数据源设置 (用于统计页面)</h6>
+                <div class="mb-3"><label class="form-label">数据源选择</label>
+                    <select id="ip_api_source" class="form-select" onchange="toggleCustomApi()">
+                        <option value="ipapi.co" ${ui.ipApiSource==='ipapi.co'?'selected':''}>ipapi.co (HTTPS, 推荐)</option>
+                        <option value="ip-api.com" ${ui.ipApiSource==='ip-api.com'?'selected':''}>ip-api.com (HTTP, 中文, 需浏览器允许)</option>
+                        <option value="ip.sb" ${ui.ipApiSource==='ip.sb'?'selected':''}>ip.sb (HTTPS, 极简)</option>
+                        <option value="custom" ${ui.ipApiSource==='custom'?'selected':''}>自定义 API</option>
+                    </select>
+                </div>
+                <div class="mb-3" id="custom_api_div" style="display:none"><label class="form-label">自定义 API URL (使用 {ip} 占位)</label><input type="text" id="custom_ip_api" class="form-control" placeholder="https://api.example.com/{ip}" value="${ui.customIpApiUrl}"></div>
+                <button class="btn btn-primary" onclick="save()">保存界面设置</button>
+            </div></div>
             <div class="card"><div class="card-header bg-info-subtle">💾 备份与还原</div><div class="card-body"><div class="d-flex gap-2"><button class="btn btn-outline-primary" onclick="exportSettings()">📤 导出</button><button class="btn btn-outline-success" onclick="document.getElementById('file_import').click()">📥 导入</button><input type="file" id="file_import" accept=".json" style="display:none" onchange="importSettings(this)"></div></div></div>
             <div class="card border-danger"><div class="card-header text-danger">🧨 危险区域</div><div class="card-body"><button class="btn btn-danger w-100" onclick="factoryReset()">恢复出厂设置</button></div></div>
         </div>
@@ -489,7 +494,15 @@ function renderAdminPage(config) {
     async function factoryReset() { if(!confirm("⚠️ 严重警告：彻底清除所有数据？")) return; await fetch('/?action=factoryReset', { method: 'POST' }); alert("已重置"); location.reload(); }
     async function resetConfig() { if(!confirm("仅重置配置？")) return; await fetch('/?action=resetConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash }) }); alert("配置已重置"); location.reload(); }
 
-    function renderUI() { document.getElementById('lb_area').innerHTML = ''; config.lbGroups.forEach(val => addLB(val)); renderSortableGroups(); renderAppGroups(); }
+    function renderUI() {
+        document.getElementById('lb_area').innerHTML = ''; config.lbGroups.forEach(val => addLB(val));
+        renderSortableGroups(); renderAppGroups();
+        toggleCustomApi();
+    }
+    function toggleCustomApi() {
+        const val = document.getElementById('ip_api_source').value;
+        document.getElementById('custom_api_div').style.display = val === 'custom' ? 'block' : 'none';
+    }
     
     function renderSortableGroups() {
         const list = document.getElementById('sortable-groups'); list.innerHTML = '';
@@ -502,21 +515,10 @@ function renderAdminPage(config) {
         });
         new Sortable(list, { handle: '.sort-handle', animation: 150, ghostClass: 'ghost-class', onEnd: function (evt) { config.groupOrder = Array.from(list.children).map(li => li.dataset.name); renderAppGroups(); } });
     }
-    
     function addNewCustomGroup() { const name = prompt("新组名称:", "MyGroup"); if (name && !config.groupOrder.includes(name)) { config.groupOrder.splice(1, 0, name); config.customAppGroups.push({ name: name, rules: [], targetLBs: [] }); renderSortableGroups(); renderAppGroups(); } }
     function deleteCustomGroup(name) { if (!confirm(\`确认删除 \${name} ?\`)) return; config.groupOrder = config.groupOrder.filter(n => n !== name); config.customAppGroups = config.customAppGroups.filter(g => g.name !== name); renderSortableGroups(); renderAppGroups(); }
-    function updateGroupName(oldName, newName) {
-        if (oldName === newName || DEFAULT_APP_NAMES.includes(oldName)) return;
-        const idx = config.groupOrder.indexOf(oldName); if (idx !== -1) config.groupOrder[idx] = newName;
-        const grp = config.customAppGroups.find(g => g.name === oldName); if (grp) grp.name = newName; renderSortableGroups(); renderAppGroups();
-    }
-
-    function validateRule(type, value) {
-        if (!value) return false;
-        if (type.startsWith('IP-CIDR') || type.startsWith('SRC-IP-CIDR')) return /^(\\d{1,3}\\.){3}\\d{1,3}(\\/\\d{1,2})?$/.test(value) || /^[0-9a-fA-F:]+(\\/\\d{1,3})?$/.test(value);
-        if (type.startsWith('DOMAIN')) return /^[a-zA-Z0-9-.*]+$/.test(value);
-        return true;
-    }
+    function updateGroupName(oldName, newName) { if (oldName === newName || DEFAULT_APP_NAMES.includes(oldName)) return; const idx = config.groupOrder.indexOf(oldName); if (idx !== -1) config.groupOrder[idx] = newName; const grp = config.customAppGroups.find(g => g.name === oldName); if (grp) grp.name = newName; renderSortableGroups(); renderAppGroups(); }
+    function validateRule(type, value) { if (!value) return false; if (type.startsWith('IP-CIDR') || type.startsWith('SRC-IP-CIDR')) return /^(\\d{1,3}\\.){3}\\d{1,3}(\\/\\d{1,2})?$/.test(value) || /^[0-9a-fA-F:]+(\\/\\d{1,3})?$/.test(value); if (type.startsWith('DOMAIN')) return /^[a-zA-Z0-9-.*]+$/.test(value); return true; }
 
     const ruleModal = new bootstrap.Modal(document.getElementById('ruleModal'));
     function openRuleEditor(mode, groupName) {
@@ -640,10 +642,15 @@ function renderAdminPage(config) {
             nameserver: split('dns_ns'), fallback: split('dns_fallback'),
             'fallback-filter': { geoip: document.getElementById('dns_geoip').checked, ipcidr: split('dns_ipcidr'), domain: split('dns_domain') }
         };
+        const uiSettings = { 
+            backgroundImage: document.getElementById('bg_image').value,
+            ipApiSource: document.getElementById('ip_api_source').value,
+            customIpApiUrl: document.getElementById('custom_ip_api').value
+        };
         const newConfig = { 
             ...config, lbGroups, appGroups, customAppGroups: updatedCustomGroups, groupOrder: config.groupOrder, dnsSettings, customGlobalRules: config.customGlobalRules,
             includeUnmatched: document.getElementById('unmatched').checked, healthCheckInterval: document.getElementById('interval').value,
-            enableOverwrite: document.getElementById('enable_overwrite').checked, uiSettings: { backgroundImage: document.getElementById('bg_image').value }
+            enableOverwrite: document.getElementById('enable_overwrite').checked, uiSettings
         };
         try {
             const resp = await fetch('/?action=saveConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash, newConfig }) });
@@ -679,6 +686,22 @@ function renderAdminPage(config) {
         }
     }
     
+    // --- IP Enrichment ---
+    async function fetchIpDetails(ip) {
+        let apiUrl = '';
+        const source = config.uiSettings.ipApiSource;
+        if(source === 'ipapi.co') apiUrl = \`https://ipapi.co/\${ip}/json/\`;
+        else if(source === 'ip-api.com') apiUrl = \`http://ip-api.com/json/\${ip}?lang=zh-CN\`;
+        else if(source === 'ip.sb') apiUrl = \`https://api.ip.sb/geoip/\${ip}\`;
+        else if(source === 'custom') apiUrl = config.uiSettings.customIpApiUrl.replace('{ip}', ip);
+        
+        try {
+            const res = await fetch(apiUrl);
+            if(!res.ok) throw new Error('Fetch failed');
+            return await res.json();
+        } catch(e) { return null; }
+    }
+
     function renderStats(data, isOverwriteEnabled) {
         const container = document.getElementById('stats_tables'); container.innerHTML = '';
         if (!data || data.length === 0) {
@@ -693,7 +716,28 @@ function renderAdminPage(config) {
             if(proxyClients.length > 0) container.innerHTML += createStatsTable("🚀 代理客户端", proxyClients, true, isOverwriteEnabled);
             if(browserClients.length > 0) container.innerHTML += createStatsTable("🌐 浏览器 / 其他", browserClients, false);
         } else {
+            // IP View with Enrichment
             container.innerHTML += createStatsTable("📍 来源 IP", data, false);
+            // Trigger delayed fetch for IPs
+            setTimeout(() => {
+                data.forEach((item, index) => {
+                    if(index > 20) return; // Limit fetches to top 20 to avoid rate limit
+                    const rowId = \`ip-row-\${index}\`;
+                    const ip = item.label;
+                    fetchIpDetails(ip).then(details => {
+                        if(!details) return;
+                        let loc = details.country || details.country_name || '';
+                        if(details.city) loc += ' ' + details.city;
+                        let asn = details.org || details.isp || details.asn_organization || '';
+                        if(details.asn) asn = \`\${details.asn} \${asn}\`;
+                        
+                        const locCell = document.getElementById(\`\${rowId}-loc\`);
+                        const asnCell = document.getElementById(\`\${rowId}-asn\`);
+                        if(locCell && loc) locCell.innerText = loc;
+                        if(asnCell && asn) asnCell.innerText = asn;
+                    });
+                });
+            }, 500);
         }
         
         if (myChart) myChart.destroy();
@@ -706,11 +750,20 @@ function renderAdminPage(config) {
     function createStatsTable(title, items, showOverwrite, isOverwriteEnabled) {
         if (items.length === 0) return '';
         items.sort((a, b) => statsSortKey === 'count' ? (statsSortAsc ? a.count - b.count : b.count - a.count) : (statsSortAsc ? a.label.localeCompare(b.label) : b.label.localeCompare(a.label)));
-        let html = \`<h6 class="mt-4">\${title}</h6><div class="table-responsive"><table class="table table-sm table-striped"><thead><tr><th onclick="toggleSort('ua')" style="cursor:pointer">\${currentStatsType.toUpperCase()} ↕</th>\${showOverwrite?'<th>覆写状态</th>':''}<th onclick="toggleSort('count')" class="text-end" style="cursor:pointer">次数 ↕</th></tr></thead><tbody>\`;
-        items.forEach(i => {
-            let status = '';
-            if(showOverwrite) status = \`<td>\${(isOverwriteEnabled) ? '<span class="badge bg-success">✅ 是</span>' : '<span class="badge bg-secondary">❌ 否</span>'}</td>\`;
-            html += \`<tr><td class="small text-break">\${i.label}</td>\${status}<td class="text-end">\${i.count}</td></tr>\`;
+        
+        const isIpView = currentStatsType === 'ip';
+        const extraHeaders = isIpView ? '<th>归属地</th><th>详情 (ASN/ISP)</th>' : (showOverwrite?'<th>覆写状态</th>':'');
+        
+        let html = \`<h6 class="mt-4">\${title}</h6><div class="table-responsive"><table class="table table-sm table-striped"><thead><tr><th onclick="toggleSort('ua')" style="cursor:pointer">\${currentStatsType.toUpperCase()} ↕</th>\${extraHeaders}<th onclick="toggleSort('count')" class="text-end" style="cursor:pointer">次数 ↕</th></tr></thead><tbody>\`;
+        
+        items.forEach((i, idx) => {
+            let middle = '';
+            if (isIpView) {
+                middle = \`<td id="ip-row-\${idx}-loc" class="text-muted small">Loading...</td><td id="ip-row-\${idx}-asn" class="text-muted small">-</td>\`;
+            } else if (showOverwrite) {
+                middle = \`<td>\${(isOverwriteEnabled) ? '<span class="badge bg-success">✅ 是</span>' : '<span class="badge bg-secondary">❌ 否</span>'}</td>\`;
+            }
+            html += \`<tr><td class="small text-break">\${i.label}</td>\${middle}<td class="text-end">\${i.count}</td></tr>\`;
         });
         html += '</tbody></table></div>'; return html;
     }
