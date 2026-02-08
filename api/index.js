@@ -1,6 +1,6 @@
 /**
  * NextReia Clash Subscription Converter & Manager
- * Version: 6.5.1 (Syntax Fix & Smart Batch Import)
+ * Version: 6.6 (Strict Syntax Fix & Crash Proof)
  */
 
 const yaml = require('js-yaml');
@@ -30,7 +30,7 @@ const DEFAULT_CONFIG = {
     enableOverwrite: true,
     uiSettings: { backgroundImage: "", ipApiSource: "ipapi.co", customIpApiUrl: "" },
     lbGroups: [
-        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰" },
+        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰|IEPL" },
         { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
         { name: "🇨🇦 加拿大", regex: "CA|canada|🇨🇦" }
     ],
@@ -59,141 +59,145 @@ const DEFAULT_CONFIG = {
     healthCheckInterval: 120
 };
 
+// 全局错误捕获
 module.exports = async (req, res) => {
     try {
-        const { url: subUrl, action } = req.query;
-        const ua = req.headers['user-agent'] || 'Unknown';
-        const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0] : (req.socket.remoteAddress || 'Unknown');
-
-        // A. 统计逻辑
-        if (subUrl && !action) {
-            (async () => {
-                try {
-                    const uaKey = `stat:ua:${Buffer.from(ua).toString('base64')}`;
-                    await kv.incr(uaKey);
-                    await kv.expire(uaKey, 86400);
-                    const ipKey = `stat:ip:${clientIp}`;
-                    await kv.incr(ipKey);
-                    await kv.expire(ipKey, 86400);
-                    await kv.incr('stat:total');
-                } catch (e) { console.error("Stats Error:", e); }
-            })();
-        }
-
-        // B. 管理 API
-        if (req.method === 'POST') {
-            const { authHash, newConfig, newPassword, previewUrl, type: statsType } = req.body;
-            const savedConfig = await kv.get('global_config');
-            const currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
-            const currentPwdHash = currentConfig.passwordHash || DEFAULT_PWD_HASH;
-
-            if (action === 'login') {
-                if (authHash === currentPwdHash) return res.json({ success: true, isDefaultPwd: currentPwdHash === DEFAULT_PWD_HASH });
-                return res.status(403).json({ success: false, msg: "密码错误" });
-            }
-            if (action === 'factoryReset') {
-                await kv.flushall();
-                return res.json({ success: true, msg: "♻️ 已恢复出厂设置，所有数据已清除" });
-            }
-            if (action === 'preview') {
-                if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
-                try {
-                    const previewRes = await generateConfig(previewUrl, "ClashMeta", currentConfig, true);
-                    return res.json({ success: true, data: previewRes });
-                } catch (e) { return res.json({ success: false, msg: "生成预览失败: " + e.message }); }
-            }
-            
-            if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
-
-            if (action === 'saveConfig') {
-                const configToSave = { ...newConfig, passwordHash: currentPwdHash };
-                await kv.set('global_config', configToSave);
-                return res.json({ success: true, msg: "✅ 设置已保存" });
-            }
-            if (action === 'resetConfig') {
-                const resetConfig = { ...DEFAULT_CONFIG, passwordHash: currentPwdHash, uiSettings: currentConfig.uiSettings };
-                await kv.set('global_config', resetConfig);
-                return res.json({ success: true, msg: "🔄 配置项已重置" });
-            }
-            if (action === 'clearStats') {
-                const keys = await kv.keys('stat:*');
-                if (keys.length > 0) await kv.del(...keys);
-                return res.json({ success: true, msg: "🧹 统计已清空" });
-            }
-            if (action === 'changePassword') {
-                if (!newPassword) return res.status(400).json({ msg: "无效密码" });
-                const configToSave = { ...currentConfig, passwordHash: newPassword };
-                await kv.set('global_config', configToSave);
-                return res.json({ success: true, msg: "密码修改成功" });
-            }
-            if (action === 'getStats') {
-                try {
-                    const reqType = statsType || 'ua';
-                    const matchPattern = reqType === 'ip' ? 'stat:ip:*' : 'stat:ua:*';
-                    const keys = await kv.keys(matchPattern);
-                    const total = await kv.get('stat:total') || 0;
-                    
-                    const stats = [];
-                    if (keys.length > 0) {
-                        const values = await kv.mget(...keys);
-                        keys.forEach((key, index) => {
-                            let label = key.replace(reqType === 'ip' ? 'stat:ip:' : 'stat:ua:', '');
-                            if (reqType === 'ua') {
-                                try { label = Buffer.from(label, 'base64').toString('utf-8'); } catch(e){ label = "Invalid Key"; }
-                            }
-                            stats.push({ label: label, count: parseInt(values[index] || 0) });
-                        });
-                    }
-                    return res.json({ success: true, data: stats, total: total, globalOverwrite: currentConfig.enableOverwrite });
-                } catch (e) { return res.json({ success: false, msg: e.message }); }
-            }
-        }
-
-        // C. 返回 Web 界面
-        if (!subUrl) {
-            const savedConfig = await kv.get('global_config');
-            const currentConfig = { 
-                ...DEFAULT_CONFIG, 
-                ...savedConfig,
-                dnsSettings: { ...DEFAULT_CONFIG.dnsSettings, ...(savedConfig?.dnsSettings || {}) },
-                uiSettings: { ...DEFAULT_CONFIG.uiSettings, ...(savedConfig?.uiSettings || {}) }
-            };
-            if (!currentConfig.customAppGroups) currentConfig.customAppGroups = [];
-            if (!currentConfig.customGlobalRules) currentConfig.customGlobalRules = [];
-            if (!currentConfig.groupOrder) currentConfig.groupOrder = [...DEFAULT_APP_NAMES];
-
-            res.setHeader('Content-Type', 'text/html; charset=utf-8');
-            return res.send(renderAdminPage(currentConfig));
-        }
-
-        // D. 订阅生成
-        const savedConfig = await kv.get('global_config');
-        const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
-        
-        const isClash = /clash|mihomo|stash/i.test(ua);
-        if (!isClash || !userConfig.enableOverwrite) {
-            const response = await axios.get(subUrl, { headers: { 'User-Agent': ua }, responseType: 'text', timeout: 10000 });
-            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-            if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
-            return res.send(response.data);
-        }
-
-        const yamlResult = await generateConfig(subUrl, ua, userConfig, false);
-        
-        const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
-        if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
-        
-        res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
-        res.send(yamlResult);
-
+        await handleRequest(req, res);
     } catch (err) {
-        // Crash Protection
-        console.error("Crash:", err);
+        console.error("Runtime Error:", err);
         res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.send(`<h3>Server Error</h3><pre>${err.stack}</pre>`);
+        res.send(`<div style="padding:20px;font-family:sans-serif;"><h3>🔴 服务端错误</h3><p>请检查 KV 数据库连接。</p><pre style="background:#eee;padding:10px;">${err.stack}</pre></div>`);
     }
 };
 
+async function handleRequest(req, res) {
+    const { url: subUrl, action } = req.query;
+    const ua = req.headers['user-agent'] || 'Unknown';
+    const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0] : (req.socket.remoteAddress || 'Unknown');
+
+    // A. 统计逻辑
+    if (subUrl && !action) {
+        (async () => {
+            try {
+                const uaKey = `stat:ua:${Buffer.from(ua).toString('base64')}`;
+                await kv.incr(uaKey);
+                await kv.expire(uaKey, 86400);
+                const ipKey = `stat:ip:${clientIp}`;
+                await kv.incr(ipKey);
+                await kv.expire(ipKey, 86400);
+                await kv.incr('stat:total');
+            } catch (e) { console.error("Stats Error (Non-blocking):", e.message); }
+        })();
+    }
+
+    // B. 管理 API
+    if (req.method === 'POST') {
+        const { authHash, newConfig, newPassword, previewUrl, type: statsType } = req.body;
+        const savedConfig = await kv.get('global_config');
+        const currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
+        const currentPwdHash = currentConfig.passwordHash || DEFAULT_PWD_HASH;
+
+        if (action === 'login') {
+            if (authHash === currentPwdHash) return res.json({ success: true, isDefaultPwd: currentPwdHash === DEFAULT_PWD_HASH });
+            return res.status(403).json({ success: false, msg: "密码错误" });
+        }
+        if (action === 'factoryReset') {
+            await kv.flushall();
+            return res.json({ success: true, msg: "♻️ 已恢复出厂设置" });
+        }
+        if (action === 'preview') {
+            if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
+            try {
+                const previewRes = await generateConfig(previewUrl, "ClashMeta", currentConfig, true);
+                return res.json({ success: true, data: previewRes });
+            } catch (e) { return res.json({ success: false, msg: "生成预览失败: " + e.message }); }
+        }
+        
+        if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
+
+        if (action === 'saveConfig') {
+            const configToSave = { ...newConfig, passwordHash: currentPwdHash };
+            await kv.set('global_config', configToSave);
+            return res.json({ success: true, msg: "✅ 设置已保存" });
+        }
+        if (action === 'resetConfig') {
+            const resetConfig = { ...DEFAULT_CONFIG, passwordHash: currentPwdHash, uiSettings: currentConfig.uiSettings };
+            await kv.set('global_config', resetConfig);
+            return res.json({ success: true, msg: "🔄 配置项已重置" });
+        }
+        if (action === 'clearStats') {
+            const keys = await kv.keys('stat:*');
+            if (keys.length > 0) await kv.del(...keys);
+            return res.json({ success: true, msg: "🧹 统计已清空" });
+        }
+        if (action === 'changePassword') {
+            if (!newPassword) return res.status(400).json({ msg: "无效密码" });
+            const configToSave = { ...currentConfig, passwordHash: newPassword };
+            await kv.set('global_config', configToSave);
+            return res.json({ success: true, msg: "密码修改成功" });
+        }
+        if (action === 'getStats') {
+            try {
+                const reqType = statsType || 'ua';
+                const matchPattern = reqType === 'ip' ? 'stat:ip:*' : 'stat:ua:*';
+                const keys = await kv.keys(matchPattern);
+                const total = await kv.get('stat:total') || 0;
+                
+                const stats = [];
+                if (keys.length > 0) {
+                    const values = await kv.mget(...keys);
+                    keys.forEach((key, index) => {
+                        let label = key.replace(reqType === 'ip' ? 'stat:ip:' : 'stat:ua:', '');
+                        if (reqType === 'ua') {
+                            try { label = Buffer.from(label, 'base64').toString('utf-8'); } catch(e){ label = "Invalid Key"; }
+                        }
+                        stats.push({ label: label, count: parseInt(values[index] || 0) });
+                    });
+                }
+                return res.json({ success: true, data: stats, total: total, globalOverwrite: currentConfig.enableOverwrite });
+            } catch (e) { return res.json({ success: false, msg: e.message }); }
+        }
+    }
+
+    // C. 返回 Web 界面
+    if (!subUrl) {
+        const savedConfig = await kv.get('global_config');
+        const currentConfig = { 
+            ...DEFAULT_CONFIG, 
+            ...savedConfig,
+            dnsSettings: { ...DEFAULT_CONFIG.dnsSettings, ...(savedConfig?.dnsSettings || {}) },
+            uiSettings: { ...DEFAULT_CONFIG.uiSettings, ...(savedConfig?.uiSettings || {}) }
+        };
+        if (!currentConfig.customAppGroups) currentConfig.customAppGroups = [];
+        if (!currentConfig.customGlobalRules) currentConfig.customGlobalRules = [];
+        if (!currentConfig.groupOrder) currentConfig.groupOrder = [...DEFAULT_APP_NAMES];
+
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.send(renderAdminPage(currentConfig));
+    }
+
+    // D. 订阅生成
+    const savedConfig = await kv.get('global_config');
+    const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
+    
+    const isClash = /clash|mihomo|stash/i.test(ua);
+    if (!isClash || !userConfig.enableOverwrite) {
+        const response = await axios.get(subUrl, { headers: { 'User-Agent': ua }, responseType: 'text', timeout: 10000 });
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
+        return res.send(response.data);
+    }
+
+    const yamlResult = await generateConfig(subUrl, ua, userConfig, false);
+    
+    const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
+    if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
+    
+    res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
+    res.send(yamlResult);
+}
+
+// === 辅助生成函数 ===
 async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
     if (!userConfig.customAppGroups) userConfig.customAppGroups = [];
     if (!userConfig.customGlobalRules) userConfig.customGlobalRules = [];
@@ -275,13 +279,14 @@ function renderAdminPage(config) {
          [data-bs-theme="dark"] .card { background-color: rgba(33, 37, 41, 0.95); }` 
         : '';
 
+    // 注意：这里全部使用单引号 + 拼接，严禁使用反引号嵌套！
     return `
 <!DOCTYPE html>
 <html lang="zh-CN" data-bs-theme="auto">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NextReia Pro V6.5</title>
+    <title>NextReia Pro V6.6</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
@@ -396,7 +401,7 @@ function renderAdminPage(config) {
 
 <div class="container" id="main-app" style="max-width:950px">
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="fw-bold">🛠️ NextReia Pro V6.5</h3>
+        <h3 class="fw-bold">🛠️ NextReia Pro V6.6</h3>
         <div><button class="btn btn-outline-secondary btn-sm me-2" onclick="showChangePwd(false)">修改密码</button><button class="btn btn-danger btn-sm" onclick="doLogout()">退出</button></div>
     </div>
 
@@ -493,19 +498,21 @@ function renderAdminPage(config) {
         renderSortableGroups(); renderAppGroups(); toggleCustomApi();
     }
     function toggleCustomApi() { document.getElementById('custom_api_div').style.display = document.getElementById('ip_api_source').value === 'custom' ? 'block' : 'none'; }
+    
     function renderSortableGroups() {
         const list = document.getElementById('sortable-groups'); list.innerHTML = '';
         config.groupOrder.forEach(name => {
             const isDefault = DEFAULT_APP_NAMES.includes(name);
             const li = document.createElement('li'); li.className = 'list-group-item'; li.dataset.name = name;
-            let btns = isDefault ? \`<span class="badge bg-secondary ms-2">默认</span><button class="btn btn-sm btn-outline-secondary ms-2" disabled>规则</button><button class="btn btn-sm btn-outline-danger ms-1" disabled>删</button>\` : \`<span class="badge bg-info text-dark ms-2">自定义</span><button class="btn btn-sm btn-outline-primary ms-2" onclick="openRuleEditor('group', '\${name}')">规则</button><button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteCustomGroup('\${name}')">删</button>\`;
-            li.innerHTML = \`<div class="d-flex align-items-center flex-grow-1"><span class="sort-handle me-2">☰</span><input type="text" class="form-control form-control-sm group-name-input" value="\${name}" \${isDefault ? 'disabled' : ''} onchange="updateGroupName('\${name}', this.value)">\${btns}</div>\`;
+            let btns = isDefault ? '<span class="badge bg-secondary ms-2">默认</span><button class="btn btn-sm btn-outline-secondary ms-2" disabled>规则</button><button class="btn btn-sm btn-outline-danger ms-1" disabled>删</button>' : '<span class="badge bg-info text-dark ms-2">自定义</span><button class="btn btn-sm btn-outline-primary ms-2" onclick="openRuleEditor(\\'group\\', \\'' + name + '\\')">规则</button><button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteCustomGroup(\\'' + name + '\\')">删</button>';
+            li.innerHTML = '<div class="d-flex align-items-center flex-grow-1"><span class="sort-handle me-2">☰</span><input type="text" class="form-control form-control-sm group-name-input" value="' + name + '" ' + (isDefault ? 'disabled' : '') + ' onchange="updateGroupName(\\'' + name + '\\', this.value)">' + btns + '</div>';
             list.appendChild(li);
         });
         new Sortable(list, { handle: '.sort-handle', animation: 150, ghostClass: 'ghost-class', onEnd: function (evt) { config.groupOrder = Array.from(list.children).map(li => li.dataset.name); renderAppGroups(); } });
     }
+    
     function addNewCustomGroup() { const name = prompt("新组名称:", "MyGroup"); if (name && !config.groupOrder.includes(name)) { config.groupOrder.splice(1, 0, name); config.customAppGroups.push({ name: name, rules: [], targetLBs: [] }); renderSortableGroups(); renderAppGroups(); } }
-    function deleteCustomGroup(name) { if (!confirm(\`确认删除 \${name} ?\`)) return; config.groupOrder = config.groupOrder.filter(n => n !== name); config.customAppGroups = config.customAppGroups.filter(g => g.name !== name); renderSortableGroups(); renderAppGroups(); }
+    function deleteCustomGroup(name) { if (!confirm('确认删除 ' + name + ' ?')) return; config.groupOrder = config.groupOrder.filter(n => n !== name); config.customAppGroups = config.customAppGroups.filter(g => g.name !== name); renderSortableGroups(); renderAppGroups(); }
     function updateGroupName(oldName, newName) { if (oldName === newName || DEFAULT_APP_NAMES.includes(oldName)) return; const idx = config.groupOrder.indexOf(oldName); if (idx !== -1) config.groupOrder[idx] = newName; const grp = config.customAppGroups.find(g => g.name === oldName); if (grp) grp.name = newName; renderSortableGroups(); renderAppGroups(); }
     function validateRule(type, value) { if (!value) return false; if (type.startsWith('IP-CIDR') || type.startsWith('SRC-IP-CIDR')) return /^(\\d{1,3}\\.){3}\\d{1,3}(\\/\\d{1,2})?$/.test(value) || /^[0-9a-fA-F:]+(\\/\\d{1,3})?$/.test(value); if (type.startsWith('DOMAIN')) return /^[a-zA-Z0-9-.*]+$/.test(value); return true; }
 
@@ -522,7 +529,7 @@ function renderAdminPage(config) {
             const targets = grp ? (grp.targetLBs || []) : [];
             getLBNames().forEach(lb => {
                 const chk = targets.includes(lb) ? 'checked' : '';
-                appChoiceContainer.innerHTML += \`<div class="form-check form-check-inline border p-1 rounded"><input class="form-check-input modal-target-chk" type="checkbox" value="\${lb}" \${chk}><label class="form-check-label small">\${lb}</label></div>\`;
+                appChoiceContainer.innerHTML += '<div class="form-check form-check-inline border p-1 rounded"><input class="form-check-input modal-target-chk" type="checkbox" value="' + lb + '" ' + chk + '><label class="form-check-label small">' + lb + '</label></div>';
             });
         }
         rules.forEach(r => addRuleRow(r.type, r.value, r.target, r.noResolve));
@@ -531,36 +538,27 @@ function renderAdminPage(config) {
     function openGlobalRuleEditor() { openRuleEditor('global'); }
     function addRuleRow(type = 'DOMAIN-SUFFIX', val = '', target = '', noResolve = false) {
         const div = document.createElement('div'); div.className = 'input-group mb-2 rule-row';
-        let typeOpts = ALL_RULE_TYPES.map(t => \`<option value="\${t}" \${type===t?'selected':''}>\${t}</option>\`).join('');
+        let typeOpts = ALL_RULE_TYPES.map(t => '<option value="' + t + '" ' + (type===t?'selected':'') + '>' + t + '</option>').join('');
         let targetInput = '';
-        if (editingMode === 'global') { let policyOpts = BUILT_IN_POLICIES.map(p => \`<option value="\${p}" \${target===p?'selected':''}>\${p}</option>\`).join(''); targetInput = \`<select class="form-select form-select-sm rule-target" style="max-width:120px">\${policyOpts}</select>\`; }
-        let nrCheck = \`<div class="input-group-text"><input class="form-check-input mt-0 rule-no-resolve" type="checkbox" \${noResolve?'checked':''} aria-label="no-resolve"> <span class="small ms-1">no-res</span></div>\`;
-        div.innerHTML = \`<select class="form-select form-select-sm rule-type rule-type-select">\${typeOpts}</select><input type="text" class="form-control form-control-sm rule-value" placeholder="值" value="\${val}">\${targetInput}\${nrCheck}<button class="btn btn-outline-danger btn-sm" onclick="this.parentElement.remove()">×</button>\`;
+        if (editingMode === 'global') { let policyOpts = BUILT_IN_POLICIES.map(p => '<option value="' + p + '" ' + (target===p?'selected':'') + '>' + p + '</option>').join(''); targetInput = '<select class="form-select form-select-sm rule-target" style="max-width:120px">' + policyOpts + '</select>'; }
+        let nrCheck = '<div class="input-group-text"><input class="form-check-input mt-0 rule-no-resolve" type="checkbox" ' + (noResolve?'checked':'') + ' aria-label="no-resolve"> <span class="small ms-1">no-res</span></div>';
+        div.innerHTML = '<select class="form-select form-select-sm rule-type rule-type-select">' + typeOpts + '</select><input type="text" class="form-control form-control-sm rule-value" placeholder="值" value="' + val + '">' + targetInput + nrCheck + '<button class="btn btn-outline-danger btn-sm" onclick="this.parentElement.remove()">×</button>';
         document.getElementById('rule-list-container').appendChild(div);
     }
     
-    // === SMART BATCH IMPORT LOGIC ===
-    function smartBatchImport() {
+    function batchImport() {
         const text = document.getElementById('batch-rule-input').value;
         const lines = text.split('\\n'); let count = 0;
         lines.forEach(line => {
-            let cleanLine = line.trim();
-            if(!cleanLine || cleanLine.startsWith('#') || cleanLine.startsWith('//')) return;
-            cleanLine = cleanLine.replace(/^-\s*/, '');
-            const parts = cleanLine.split(',').map(s => s.trim());
-            if(parts.length >= 2) {
-                let type = parts[0].toUpperCase(); let value = parts[1];
-                let noResolve = cleanLine.toLowerCase().includes('no-resolve');
-                let target = '';
-                if(type === 'DOMAINSUFFIX') type = 'DOMAIN-SUFFIX'; if(type === 'IPCIDR') type = 'IP-CIDR';
-                if(ALL_RULE_TYPES.includes(type)) {
-                    if(editingMode === 'global') { if(parts.length > 2 && !parts[2].toLowerCase().includes('no-resolve')) target = parts[2]; }
-                    addRuleRow(type, value, target, noResolve);
-                    count++;
-                }
+            const parts = line.split(',').map(s => s.trim());
+            if (parts.length >= 2) {
+                const type = parts[0].toUpperCase(); const val = parts[1];
+                const target = parts.length > 2 && !parts[2].includes('no-resolve') ? parts[2] : '';
+                const noRes = line.includes('no-resolve');
+                if (ALL_RULE_TYPES.includes(type)) { addRuleRow(type, val, target, noRes); count++; }
             }
         });
-        alert('成功识别并导入 ' + count + ' 条规则！');
+        alert('已导入 ' + count + ' 条');
         new bootstrap.Tab(document.querySelector('button[data-bs-target="#edit-visual"]')).show();
     }
 
@@ -595,16 +593,16 @@ function renderAdminPage(config) {
             let selected = [];
             if (isDefault) selected = config.appGroups[appName] || [];
             else { const grp = config.customAppGroups.find(g => g.name === appName); selected = grp ? (grp.targetLBs || []) : []; }
-            let html = \`<div class="d-flex justify-content-between"><span class="fw-bold mb-1">\${appName} \${!isDefault ? '<small class="text-info">(自定义)</small>' : ''}</span></div><div class="checkbox-grid">\`;
+            let html = '<div class="d-flex justify-content-between"><span class="fw-bold mb-1">' + appName + (isDefault?'':' <small class="text-info">(自定义)</small>') + '</span></div><div class="checkbox-grid">';
             getLBNames().forEach(lb => {
                 const chk = selected.includes(lb) ? 'checked' : '';
-                html += \`<div class="form-check form-check-inline m-0"><input class="form-check-input" type="checkbox" value="\${lb}" \${chk}><label class="form-check-label small">\${lb}</label></div>\`;
+                html += '<div class="form-check form-check-inline m-0"><input class="form-check-input" type="checkbox" value="' + lb + '" ' + chk + '><label class="form-check-label small">' + lb + '</label></div>';
             });
-            html += \`</div>\`; row.innerHTML = html; container.appendChild(row);
+            html += '</div>'; row.innerHTML = html; container.appendChild(row);
         });
     }
     function getLBNames() { const names = []; document.querySelectorAll('.lb-n').forEach(i => { if(i.value) names.push(i.value); }); return names.length > 0 ? names : config.lbGroups.map(g => g.name); }
-    function addLB(val = {name:'', regex:''}) { const div = document.createElement('div'); div.className = 'input-group mb-2 lb-item'; div.innerHTML = \`<input type="text" class="form-control lb-n" value="\${val.name}"><input type="text" class="form-control lb-r" value="\${val.regex}"><button class="btn btn-danger" onclick="this.parentElement.remove(); renderAppGroups();">×</button>\`; document.getElementById('lb_area').appendChild(div); }
+    function addLB(val = {name:'', regex:''}) { const div = document.createElement('div'); div.className = 'input-group mb-2 lb-item'; div.innerHTML = '<input type="text" class="form-control lb-n" value="' + val.name + '"><input type="text" class="form-control lb-r" value="' + val.regex + '"><button class="btn btn-danger" onclick="this.parentElement.remove(); renderAppGroups();">×</button>'; document.getElementById('lb_area').appendChild(div); }
 
     function exportSettings() {
         const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(config));
@@ -640,15 +638,10 @@ function renderAdminPage(config) {
             nameserver: split('dns_ns'), fallback: split('dns_fallback'),
             'fallback-filter': { geoip: document.getElementById('dns_geoip').checked, ipcidr: split('dns_ipcidr'), domain: split('dns_domain') }
         };
-        const uiSettings = { 
-            backgroundImage: document.getElementById('bg_image').value,
-            ipApiSource: document.getElementById('ip_api_source').value,
-            customIpApiUrl: document.getElementById('custom_ip_api').value
-        };
         const newConfig = { 
             ...config, lbGroups, appGroups, customAppGroups: updatedCustomGroups, groupOrder: config.groupOrder, dnsSettings, customGlobalRules: config.customGlobalRules,
             includeUnmatched: document.getElementById('unmatched').checked, healthCheckInterval: document.getElementById('interval').value,
-            enableOverwrite: document.getElementById('enable_overwrite').checked, uiSettings
+            enableOverwrite: document.getElementById('enable_overwrite').checked, uiSettings: { backgroundImage: document.getElementById('bg_image').value, ipApiSource: document.getElementById('ip_api_source').value, customIpApiUrl: document.getElementById('custom_ip_api').value }
         };
         try {
             const resp = await fetch('/?action=saveConfig', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: authTokenHash, newConfig }) });
@@ -687,9 +680,9 @@ function renderAdminPage(config) {
     // IP Fetch logic (V6.4)
     async function fetchIpDetails(ip) {
         let apiUrl = ''; const source = config.uiSettings.ipApiSource;
-        if(source === 'ipapi.co') apiUrl = \`https://ipapi.co/\${ip}/json/\`;
-        else if(source === 'ip-api.com') apiUrl = \`http://ip-api.com/json/\${ip}?lang=zh-CN\`;
-        else if(source === 'ip.sb') apiUrl = \`https://api.ip.sb/geoip/\${ip}\`;
+        if(source === 'ipapi.co') apiUrl = 'https://ipapi.co/' + ip + '/json/';
+        else if(source === 'ip-api.com') apiUrl = 'http://ip-api.com/json/' + ip + '?lang=zh-CN';
+        else if(source === 'ip.sb') apiUrl = 'https://api.ip.sb/geoip/' + ip;
         else if(source === 'custom') apiUrl = config.uiSettings.customIpApiUrl.replace('{ip}', ip);
         try {
             const res = await fetch(apiUrl); if(!res.ok) throw new Error('Fetch failed'); return await res.json();
@@ -712,12 +705,12 @@ function renderAdminPage(config) {
             container.innerHTML += createStatsTable("📍 来源 IP", data, false);
             setTimeout(() => {
                 data.slice(0, 20).forEach((item, index) => {
-                    const rowId = \`ip-row-\${index}\`;
+                    const rowId = 'ip-row-' + index;
                     fetchIpDetails(item.label).then(details => {
                         if(!details) return;
                         let loc = details.country || details.country_name || ''; if(details.city) loc += ' ' + details.city;
-                        let asn = details.org || details.isp || details.asn_organization || ''; if(details.asn) asn = \`\${details.asn} \${asn}\`;
-                        const locCell = document.getElementById(\`\${rowId}-loc\`); const asnCell = document.getElementById(\`\${rowId}-asn\`);
+                        let asn = details.org || details.isp || details.asn_organization || ''; if(details.asn) asn = details.asn + ' ' + asn;
+                        const locCell = document.getElementById(rowId + '-loc'); const asnCell = document.getElementById(rowId + '-asn');
                         if(locCell && loc) locCell.innerText = loc; if(asnCell && asn) asnCell.innerText = asn;
                     });
                 });
@@ -738,13 +731,13 @@ function renderAdminPage(config) {
         const isIpView = currentStatsType === 'ip';
         const extraHeaders = isIpView ? '<th>归属地</th><th>详情 (ASN/ISP)</th>' : (showOverwrite?'<th>覆写状态</th>':'');
         
-        let html = \`<h6 class="mt-4">\${title}</h6><div class="table-responsive"><table class="table table-sm table-striped"><thead><tr><th onclick="toggleSort('ua')" style="cursor:pointer">\${currentStatsType.toUpperCase()} ↕</th>\${extraHeaders}<th onclick="toggleSort('count')" class="text-end" style="cursor:pointer">次数 ↕</th></tr></thead><tbody>\`;
+        let html = '<h6 class="mt-4">' + title + '</h6><div class="table-responsive"><table class="table table-sm table-striped"><thead><tr><th onclick="toggleSort(\\'ua\\')" style="cursor:pointer">' + currentStatsType.toUpperCase() + ' ↕</th>' + extraHeaders + '<th onclick="toggleSort(\\'count\\')" class="text-end" style="cursor:pointer">次数 ↕</th></tr></thead><tbody>';
         
         items.forEach((i, idx) => {
             let middle = '';
-            if (isIpView) { middle = \`<td id="ip-row-\${idx}-loc" class="text-muted small">Loading...</td><td id="ip-row-\${idx}-asn" class="text-muted small">-</td>\`; }
-            else if (showOverwrite) { middle = \`<td>\${(isOverwriteEnabled) ? '<span class="badge bg-success">✅ 是</span>' : '<span class="badge bg-secondary">❌ 否</span>'}</td>\`; }
-            html += \`<tr><td class="small text-break">\${i.label}</td>\${middle}<td class="text-end">\${i.count}</td></tr>\`;
+            if (isIpView) { middle = '<td id="ip-row-' + idx + '-loc" class="text-muted small">Loading...</td><td id="ip-row-' + idx + '-asn" class="text-muted small">-</td>'; }
+            else if (showOverwrite) { middle = '<td>' + ((isOverwriteEnabled) ? '<span class="badge bg-success">✅ 是</span>' : '<span class="badge bg-secondary">❌ 否</span>') + '</td>'; }
+            html += '<tr><td class="small text-break">' + i.label + '</td>' + middle + '<td class="text-end">' + i.count + '</td></tr>';
         });
         html += '</tbody></table></div>'; return html;
     }
