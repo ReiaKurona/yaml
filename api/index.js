@@ -1,6 +1,6 @@
 /**
  * NextReia Clash Subscription Converter & Manager
- * Version: 6.4 (IP Geolocation, ASN, Custom Source)
+ * Version: 6.5 (Smart Batch Import & Context Aware)
  */
 
 const yaml = require('js-yaml');
@@ -28,12 +28,7 @@ const BUILT_IN_POLICIES = ["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBL
 const DEFAULT_CONFIG = {
     passwordHash: DEFAULT_PWD_HASH,
     enableOverwrite: true,
-    // 新增 ipApiSource 和 customIpApiUrl
-    uiSettings: { 
-        backgroundImage: "",
-        ipApiSource: "ipapi.co", // 默认使用支持 HTTPS 的源
-        customIpApiUrl: "" 
-    },
+    uiSettings: { backgroundImage: "", ipApiSource: "ipapi.co", customIpApiUrl: "" },
     lbGroups: [
         { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰" },
         { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
@@ -76,11 +71,9 @@ module.exports = async (req, res) => {
                 const uaKey = `stat:ua:${Buffer.from(ua).toString('base64')}`;
                 await kv.incr(uaKey);
                 await kv.expire(uaKey, 86400);
-                
                 const ipKey = `stat:ip:${clientIp}`;
                 await kv.incr(ipKey);
                 await kv.expire(ipKey, 86400);
-
                 await kv.incr('stat:total');
             } catch (e) { console.error("Stats Error:", e); }
         })();
@@ -164,7 +157,6 @@ module.exports = async (req, res) => {
             dnsSettings: { ...DEFAULT_CONFIG.dnsSettings, ...(savedConfig?.dnsSettings || {}) },
             uiSettings: { ...DEFAULT_CONFIG.uiSettings, ...(savedConfig?.uiSettings || {}) }
         };
-        // 兼容性
         if (!currentConfig.customAppGroups) currentConfig.customAppGroups = [];
         if (!currentConfig.customGlobalRules) currentConfig.customGlobalRules = [];
         if (!currentConfig.groupOrder) currentConfig.groupOrder = [...DEFAULT_APP_NAMES];
@@ -259,7 +251,7 @@ async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
 
 function renderAdminPage(config) {
     const dns = config.dnsSettings || DEFAULT_CONFIG.dnsSettings;
-    const ui = config.uiSettings || { backgroundImage: "", ipApiSource: "ipapi.co", customIpApiUrl: "" };
+    const ui = config.uiSettings || { backgroundImage: "" };
     
     const dnsDisplay = {
         ...dns,
@@ -282,7 +274,7 @@ function renderAdminPage(config) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NextReia Pro V6.4</title>
+    <title>NextReia Pro V6.5</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
@@ -361,7 +353,7 @@ function renderAdminPage(config) {
             <div class="modal-body">
                 <ul class="nav nav-tabs mb-3">
                     <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#edit-visual">可视化编辑</button></li>
-                    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-batch">批量导入</button></li>
+                    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-batch">智能批量导入</button></li>
                 </ul>
                 <div class="tab-content">
                     <div class="tab-pane fade show active" id="edit-visual">
@@ -369,9 +361,18 @@ function renderAdminPage(config) {
                         <button class="btn btn-sm btn-outline-success mt-2" onclick="addRuleRow()">+ 新增规则</button>
                     </div>
                     <div class="tab-pane fade" id="edit-batch">
-                        <div class="alert alert-secondary small p-2">格式：<code>类型,内容,目标(可选),no-resolve(可选)</code>，一行一条。</div>
-                        <textarea id="batch-rule-input" class="form-control" rows="10" placeholder="DOMAIN-SUFFIX,google.com,MyGroup"></textarea>
-                        <button class="btn btn-sm btn-info mt-2" onclick="batchImport()">识别并导入</button>
+                        <div class="alert alert-info small p-2">
+                            <strong>智能导入引擎</strong>：直接粘贴 Clash 配置文件中的 Rules 部分即可。
+                            <ul>
+                                <li>自动忽略注释 (<code>#</code>, <code>//</code>) 和行首 <code>-</code>。</li>
+                                <li>支持标准格式 (<code>DOMAIN,google.com,Proxy</code>) 或 简写格式。</li>
+                                <li><strong>注意：</strong>如果当前正在编辑【策略组规则】，导入的目标（如 Proxy）将被忽略，自动指向当前组。</li>
+                            </ul>
+                        </div>
+                        <textarea id="batch-rule-input" class="form-control" rows="12" placeholder="# 示例：
+- DOMAIN-SUFFIX, nicovideo.jp, Proxy
+DOMAIN-KEYWORD, bilibili, DIRECT, no-resolve"></textarea>
+                        <button class="btn btn-sm btn-primary mt-2" onclick="smartBatchImport()">⚡ 智能识别并导入</button>
                     </div>
                 </div>
                 <div id="modal-target-section" class="mt-3"><hr><h6>目标负载均衡组</h6><div id="modal-app-choices" class="checkbox-grid"></div></div>
@@ -394,7 +395,7 @@ function renderAdminPage(config) {
 
 <div class="container" id="main-app" style="max-width:950px">
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="fw-bold">🛠️ NextReia Pro V6.4</h3>
+        <h3 class="fw-bold">🛠️ NextReia Pro V6.5</h3>
         <div><button class="btn btn-outline-secondary btn-sm me-2" onclick="showChangePwd(false)">修改密码</button><button class="btn btn-danger btn-sm" onclick="doLogout()">退出</button></div>
     </div>
 
@@ -438,17 +439,9 @@ function renderAdminPage(config) {
         <div class="tab-pane fade" id="ui-pane">
             <div class="card"><div class="card-header">🎨 个性化</div><div class="card-body">
                 <div class="mb-3"><label class="form-label">背景图片 URL</label><input type="text" id="bg_image" class="form-control" placeholder="https://..." value="${ui.backgroundImage}"></div>
-                <hr>
-                <h6 class="mb-3">IP 数据源设置 (用于统计页面)</h6>
-                <div class="mb-3"><label class="form-label">数据源选择</label>
-                    <select id="ip_api_source" class="form-select" onchange="toggleCustomApi()">
-                        <option value="ipapi.co" ${ui.ipApiSource==='ipapi.co'?'selected':''}>ipapi.co (HTTPS, 推荐)</option>
-                        <option value="ip-api.com" ${ui.ipApiSource==='ip-api.com'?'selected':''}>ip-api.com (HTTP, 中文, 需浏览器允许)</option>
-                        <option value="ip.sb" ${ui.ipApiSource==='ip.sb'?'selected':''}>ip.sb (HTTPS, 极简)</option>
-                        <option value="custom" ${ui.ipApiSource==='custom'?'selected':''}>自定义 API</option>
-                    </select>
-                </div>
-                <div class="mb-3" id="custom_api_div" style="display:none"><label class="form-label">自定义 API URL (使用 {ip} 占位)</label><input type="text" id="custom_ip_api" class="form-control" placeholder="https://api.example.com/{ip}" value="${ui.customIpApiUrl}"></div>
+                <hr><h6 class="mb-3">IP 数据源设置</h6>
+                <div class="mb-3"><label class="form-label">数据源</label><select id="ip_api_source" class="form-select" onchange="toggleCustomApi()"><option value="ipapi.co" ${ui.ipApiSource==='ipapi.co'?'selected':''}>ipapi.co (HTTPS)</option><option value="ip-api.com" ${ui.ipApiSource==='ip-api.com'?'selected':''}>ip-api.com (HTTP)</option><option value="ip.sb" ${ui.ipApiSource==='ip.sb'?'selected':''}>ip.sb (HTTPS)</option><option value="custom" ${ui.ipApiSource==='custom'?'selected':''}>自定义</option></select></div>
+                <div class="mb-3" id="custom_api_div" style="display:none"><label class="form-label">自定义 URL ({ip}占位)</label><input type="text" id="custom_ip_api" class="form-control" value="${ui.customIpApiUrl}"></div>
                 <button class="btn btn-primary" onclick="save()">保存界面设置</button>
             </div></div>
             <div class="card"><div class="card-header bg-info-subtle">💾 备份与还原</div><div class="card-body"><div class="d-flex gap-2"><button class="btn btn-outline-primary" onclick="exportSettings()">📤 导出</button><button class="btn btn-outline-success" onclick="document.getElementById('file_import').click()">📥 导入</button><input type="file" id="file_import" accept=".json" style="display:none" onchange="importSettings(this)"></div></div></div>
@@ -496,14 +489,9 @@ function renderAdminPage(config) {
 
     function renderUI() {
         document.getElementById('lb_area').innerHTML = ''; config.lbGroups.forEach(val => addLB(val));
-        renderSortableGroups(); renderAppGroups();
-        toggleCustomApi();
+        renderSortableGroups(); renderAppGroups(); toggleCustomApi();
     }
-    function toggleCustomApi() {
-        const val = document.getElementById('ip_api_source').value;
-        document.getElementById('custom_api_div').style.display = val === 'custom' ? 'block' : 'none';
-    }
-    
+    function toggleCustomApi() { document.getElementById('custom_api_div').style.display = document.getElementById('ip_api_source').value === 'custom' ? 'block' : 'none'; }
     function renderSortableGroups() {
         const list = document.getElementById('sortable-groups'); list.innerHTML = '';
         config.groupOrder.forEach(name => {
@@ -550,19 +538,50 @@ function renderAdminPage(config) {
         document.getElementById('rule-list-container').appendChild(div);
     }
     
-    function batchImport() {
+    // --- SMART BATCH IMPORT ENGINE ---
+    function smartBatchImport() {
         const text = document.getElementById('batch-rule-input').value;
-        const lines = text.split('\\n'); let count = 0;
+        const lines = text.split('\\n');
+        let count = 0;
+        
         lines.forEach(line => {
-            const parts = line.split(',').map(s => s.trim());
-            if (parts.length >= 2) {
-                const type = parts[0].toUpperCase(); const val = parts[1];
-                const target = parts.length > 2 && !parts[2].includes('no-resolve') ? parts[2] : '';
-                const noRes = line.includes('no-resolve');
-                if (ALL_RULE_TYPES.includes(type)) { addRuleRow(type, val, target, noRes); count++; }
+            // 1. Cleanup: Remove comments, leading dashes, trim
+            let cleanLine = line.trim();
+            if(!cleanLine || cleanLine.startsWith('#') || cleanLine.startsWith('//')) return;
+            cleanLine = cleanLine.replace(/^-\s*/, ''); // Remove YAML list dash
+            
+            // 2. Split by comma
+            const parts = cleanLine.split(',').map(s => s.trim());
+            
+            if(parts.length >= 2) {
+                let type = parts[0].toUpperCase();
+                let value = parts[1];
+                let noResolve = cleanLine.toLowerCase().includes('no-resolve');
+                let target = '';
+
+                // Simple Type Correction
+                if(type === 'DOMAINSUFFIX') type = 'DOMAIN-SUFFIX';
+                if(type === 'IPCIDR') type = 'IP-CIDR';
+
+                if(ALL_RULE_TYPES.includes(type)) {
+                    // Context Aware Logic
+                    if(editingMode === 'global') {
+                        // Global mode: Try to get target from 3rd part
+                        if(parts.length > 2 && !parts[2].toLowerCase().includes('no-resolve')) {
+                            target = parts[2];
+                        }
+                    } else {
+                        // Group mode: Ignore target from text, it defaults to the group being edited
+                        target = '';
+                    }
+                    
+                    addRuleRow(type, value, target, noRes);
+                    count++;
+                }
             }
         });
-        alert(\`已导入 \${count} 条\`);
+        
+        alert(\`成功识别并导入 \${count} 条规则！\`);
         new bootstrap.Tab(document.querySelector('button[data-bs-target="#edit-visual"]')).show();
     }
 
@@ -686,28 +705,23 @@ function renderAdminPage(config) {
         }
     }
     
-    // --- IP Enrichment ---
+    // IP Fetch logic (V6.4)
     async function fetchIpDetails(ip) {
-        let apiUrl = '';
-        const source = config.uiSettings.ipApiSource;
+        let apiUrl = ''; const source = config.uiSettings.ipApiSource;
         if(source === 'ipapi.co') apiUrl = \`https://ipapi.co/\${ip}/json/\`;
         else if(source === 'ip-api.com') apiUrl = \`http://ip-api.com/json/\${ip}?lang=zh-CN\`;
         else if(source === 'ip.sb') apiUrl = \`https://api.ip.sb/geoip/\${ip}\`;
         else if(source === 'custom') apiUrl = config.uiSettings.customIpApiUrl.replace('{ip}', ip);
-        
         try {
-            const res = await fetch(apiUrl);
-            if(!res.ok) throw new Error('Fetch failed');
-            return await res.json();
+            const res = await fetch(apiUrl); if(!res.ok) throw new Error('Fetch failed'); return await res.json();
         } catch(e) { return null; }
     }
 
     function renderStats(data, isOverwriteEnabled) {
         const container = document.getElementById('stats_tables'); container.innerHTML = '';
         if (!data || data.length === 0) {
-            container.innerHTML = '<div class="text-center text-muted py-5">暂无数据，请尝试连接一次订阅链接</div>';
-            if(myChart) myChart.destroy();
-            return;
+            container.innerHTML = '<div class="text-center text-muted py-5">暂无数据</div>';
+            if(myChart) myChart.destroy(); return;
         }
 
         if(currentStatsType === 'ua') {
@@ -716,25 +730,16 @@ function renderAdminPage(config) {
             if(proxyClients.length > 0) container.innerHTML += createStatsTable("🚀 代理客户端", proxyClients, true, isOverwriteEnabled);
             if(browserClients.length > 0) container.innerHTML += createStatsTable("🌐 浏览器 / 其他", browserClients, false);
         } else {
-            // IP View with Enrichment
             container.innerHTML += createStatsTable("📍 来源 IP", data, false);
-            // Trigger delayed fetch for IPs
             setTimeout(() => {
-                data.forEach((item, index) => {
-                    if(index > 20) return; // Limit fetches to top 20 to avoid rate limit
+                data.slice(0, 20).forEach((item, index) => {
                     const rowId = \`ip-row-\${index}\`;
-                    const ip = item.label;
-                    fetchIpDetails(ip).then(details => {
+                    fetchIpDetails(item.label).then(details => {
                         if(!details) return;
-                        let loc = details.country || details.country_name || '';
-                        if(details.city) loc += ' ' + details.city;
-                        let asn = details.org || details.isp || details.asn_organization || '';
-                        if(details.asn) asn = \`\${details.asn} \${asn}\`;
-                        
-                        const locCell = document.getElementById(\`\${rowId}-loc\`);
-                        const asnCell = document.getElementById(\`\${rowId}-asn\`);
-                        if(locCell && loc) locCell.innerText = loc;
-                        if(asnCell && asn) asnCell.innerText = asn;
+                        let loc = details.country || details.country_name || ''; if(details.city) loc += ' ' + details.city;
+                        let asn = details.org || details.isp || details.asn_organization || ''; if(details.asn) asn = \`\${details.asn} \${asn}\`;
+                        const locCell = document.getElementById(\`\${rowId}-loc\`); const asnCell = document.getElementById(\`\${rowId}-asn\`);
+                        if(locCell && loc) locCell.innerText = loc; if(asnCell && asn) asnCell.innerText = asn;
                     });
                 });
             }, 500);
@@ -758,19 +763,15 @@ function renderAdminPage(config) {
         
         items.forEach((i, idx) => {
             let middle = '';
-            if (isIpView) {
-                middle = \`<td id="ip-row-\${idx}-loc" class="text-muted small">Loading...</td><td id="ip-row-\${idx}-asn" class="text-muted small">-</td>\`;
-            } else if (showOverwrite) {
-                middle = \`<td>\${(isOverwriteEnabled) ? '<span class="badge bg-success">✅ 是</span>' : '<span class="badge bg-secondary">❌ 否</span>'}</td>\`;
-            }
+            if (isIpView) { middle = \`<td id="ip-row-\${idx}-loc" class="text-muted small">Loading...</td><td id="ip-row-\${idx}-asn" class="text-muted small">-</td>\`; }
+            else if (showOverwrite) { middle = \`<td>\${(isOverwriteEnabled) ? '<span class="badge bg-success">✅ 是</span>' : '<span class="badge bg-secondary">❌ 否</span>'}</td>\`; }
             html += \`<tr><td class="small text-break">\${i.label}</td>\${middle}<td class="text-end">\${i.count}</td></tr>\`;
         });
         html += '</tbody></table></div>'; return html;
     }
 
     function toggleSort(key) {
-        if (statsSortKey === key) statsSortAsc = !statsSortAsc;
-        else { statsSortKey = key; statsSortAsc = false; }
+        if (statsSortKey === key) statsSortAsc = !statsSortAsc; else { statsSortKey = key; statsSortAsc = false; }
         renderStats(currentStatsData, currentIsOverwrite);
     }
 
@@ -781,4 +782,3 @@ function renderAdminPage(config) {
 </script>
 </body>
 </html>`;
-}
