@@ -1,11 +1,6 @@
 /**
  * NextReia Clash Subscription Converter & Manager
- * Version: 6.5 (Smart Batch Import & Fuzzy Parsing)
- * 
- * Update Log:
- * - Added smart parsing logic for batch import.
- * - Added context-aware target replacement (Group vs Global).
- * - Improved comments for maintenance.
+ * Version: 6.6 (Login Fix & Stability)
  */
 
 const yaml = require('js-yaml');
@@ -13,7 +8,7 @@ const axios = require('axios');
 const { kv } = require('@vercel/kv');
 const crypto = require('crypto');
 
-// === 工具函数：SHA-256 哈希计算 ===
+// === 工具函数 ===
 function hashPwd(password) {
     return crypto.createHash('sha256').update(password).digest('hex');
 }
@@ -21,7 +16,6 @@ function hashPwd(password) {
 const DEFAULT_PWD_HASH = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918";
 const DEFAULT_APP_NAMES = ["Sora&ChatGPT", "ABEMA", "赛马娘PrettyDerby", "PJSK-JP", "Claude"];
 
-// Mihomo 支持的所有规则类型 (标准全集)
 const ALL_RULE_TYPES = [
     "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX", "GEOSITE", 
     "IP-CIDR", "IP-CIDR6", "IP-SUFFIX", "IP-ASN", "GEOIP", "SRC-IP-CIDR", 
@@ -34,11 +28,7 @@ const BUILT_IN_POLICIES = ["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBL
 const DEFAULT_CONFIG = {
     passwordHash: DEFAULT_PWD_HASH,
     enableOverwrite: true,
-    uiSettings: { 
-        backgroundImage: "",
-        ipApiSource: "ipapi.co",
-        customIpApiUrl: "" 
-    },
+    uiSettings: { backgroundImage: "", ipApiSource: "ipapi.co", customIpApiUrl: "" },
     lbGroups: [
         { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰" },
         { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
@@ -74,88 +64,58 @@ module.exports = async (req, res) => {
     const ua = req.headers['user-agent'] || 'Unknown';
     const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0] : (req.socket.remoteAddress || 'Unknown');
 
-    // A. 统计逻辑
     if (subUrl && !action) {
         (async () => {
             try {
                 const uaKey = `stat:ua:${Buffer.from(ua).toString('base64')}`;
-                await kv.incr(uaKey);
-                await kv.expire(uaKey, 86400);
-                
+                await kv.incr(uaKey); await kv.expire(uaKey, 86400);
                 const ipKey = `stat:ip:${clientIp}`;
-                await kv.incr(ipKey);
-                await kv.expire(ipKey, 86400);
-
+                await kv.incr(ipKey); await kv.expire(ipKey, 86400);
                 await kv.incr('stat:total');
             } catch (e) { console.error("Stats Error:", e); }
         })();
     }
 
-    // B. 管理 API
     if (req.method === 'POST') {
         const { authHash, newConfig, newPassword, previewUrl, type: statsType } = req.body;
         const savedConfig = await kv.get('global_config');
         const currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
         const currentPwdHash = currentConfig.passwordHash || DEFAULT_PWD_HASH;
 
-        // Login
         if (action === 'login') {
             if (authHash === currentPwdHash) return res.json({ success: true, isDefaultPwd: currentPwdHash === DEFAULT_PWD_HASH });
             return res.status(403).json({ success: false, msg: "密码错误" });
         }
-        // Factory Reset
-        if (action === 'factoryReset') {
-            await kv.flushall();
-            return res.json({ success: true, msg: "♻️ 已恢复出厂设置，所有数据已清除" });
-        }
-        // Preview
+        if (action === 'factoryReset') { await kv.flushall(); return res.json({ success: true, msg: "♻️ 已恢复出厂设置" }); }
         if (action === 'preview') {
             if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
-            try {
-                const previewRes = await generateConfig(previewUrl, "ClashMeta", currentConfig, true);
-                return res.json({ success: true, data: previewRes });
-            } catch (e) { return res.json({ success: false, msg: "生成预览失败: " + e.message }); }
+            try { return res.json({ success: true, data: await generateConfig(previewUrl, "ClashMeta", currentConfig, true) }); } 
+            catch (e) { return res.json({ success: false, msg: "生成失败: " + e.message }); }
         }
-        
-        // Auth Check
         if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
-
         if (action === 'saveConfig') {
-            const configToSave = { ...newConfig, passwordHash: currentPwdHash };
-            await kv.set('global_config', configToSave);
-            return res.json({ success: true, msg: "✅ 设置已保存" });
+            const configToSave = { ...newConfig, passwordHash: currentPwdHash }; await kv.set('global_config', configToSave); return res.json({ success: true, msg: "✅ 保存成功" });
         }
         if (action === 'resetConfig') {
-            const resetConfig = { ...DEFAULT_CONFIG, passwordHash: currentPwdHash, uiSettings: currentConfig.uiSettings };
-            await kv.set('global_config', resetConfig);
-            return res.json({ success: true, msg: "🔄 配置项已重置" });
+            const resetConfig = { ...DEFAULT_CONFIG, passwordHash: currentPwdHash, uiSettings: currentConfig.uiSettings }; await kv.set('global_config', resetConfig); return res.json({ success: true, msg: "🔄 配置已重置" });
         }
         if (action === 'clearStats') {
-            const keys = await kv.keys('stat:*');
-            if (keys.length > 0) await kv.del(...keys);
-            return res.json({ success: true, msg: "🧹 统计已清空" });
+            const keys = await kv.keys('stat:*'); if (keys.length > 0) await kv.del(...keys); return res.json({ success: true, msg: "🧹 统计已清空" });
         }
         if (action === 'changePassword') {
             if (!newPassword) return res.status(400).json({ msg: "无效密码" });
-            const configToSave = { ...currentConfig, passwordHash: newPassword };
-            await kv.set('global_config', configToSave);
-            return res.json({ success: true, msg: "密码修改成功" });
+            const configToSave = { ...currentConfig, passwordHash: newPassword }; await kv.set('global_config', configToSave); return res.json({ success: true, msg: "密码修改成功" });
         }
         if (action === 'getStats') {
             try {
-                const reqType = statsType || 'ua';
-                const matchPattern = reqType === 'ip' ? 'stat:ip:*' : 'stat:ua:*';
-                const keys = await kv.keys(matchPattern);
-                const total = await kv.get('stat:total') || 0;
-                
+                const reqType = statsType || 'ua'; const matchPattern = reqType === 'ip' ? 'stat:ip:*' : 'stat:ua:*';
+                const keys = await kv.keys(matchPattern); const total = await kv.get('stat:total') || 0;
                 const stats = [];
                 if (keys.length > 0) {
                     const values = await kv.mget(...keys);
                     keys.forEach((key, index) => {
                         let label = key.replace(reqType === 'ip' ? 'stat:ip:' : 'stat:ua:', '');
-                        if (reqType === 'ua') {
-                            try { label = Buffer.from(label, 'base64').toString('utf-8'); } catch(e){ label = "Invalid Key"; }
-                        }
+                        if (reqType === 'ua') { try { label = Buffer.from(label, 'base64').toString('utf-8'); } catch(e){ label = "Invalid Key"; } }
                         stats.push({ label: label, count: parseInt(values[index] || 0) });
                     });
                 }
@@ -164,29 +124,23 @@ module.exports = async (req, res) => {
         }
     }
 
-    // C. 返回 Web 界面
     if (!subUrl) {
         const savedConfig = await kv.get('global_config');
         const currentConfig = { 
-            ...DEFAULT_CONFIG, 
-            ...savedConfig,
+            ...DEFAULT_CONFIG, ...savedConfig,
             dnsSettings: { ...DEFAULT_CONFIG.dnsSettings, ...(savedConfig?.dnsSettings || {}) },
             uiSettings: { ...DEFAULT_CONFIG.uiSettings, ...(savedConfig?.uiSettings || {}) }
         };
-        // 兼容性检查
         if (!currentConfig.customAppGroups) currentConfig.customAppGroups = [];
         if (!currentConfig.customGlobalRules) currentConfig.customGlobalRules = [];
         if (!currentConfig.groupOrder) currentConfig.groupOrder = [...DEFAULT_APP_NAMES];
-
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         return res.send(renderAdminPage(currentConfig));
     }
 
-    // D. 订阅生成
     try {
         const savedConfig = await kv.get('global_config');
         const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
-        
         const isClash = /clash|mihomo|stash/i.test(ua);
         if (!isClash || !userConfig.enableOverwrite) {
             const response = await axios.get(subUrl, { headers: { 'User-Agent': ua }, responseType: 'text', timeout: 10000 });
@@ -194,21 +148,13 @@ module.exports = async (req, res) => {
             if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
             return res.send(response.data);
         }
-
         const yamlResult = await generateConfig(subUrl, ua, userConfig, false);
-        
         const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
         if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
-        
-        res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
-        res.send(yamlResult);
-
-    } catch (err) {
-        res.status(500).send(`Error: ${err.message}`);
-    }
+        res.setHeader('Content-Type', 'text/yaml; charset=utf-8'); res.send(yamlResult);
+    } catch (err) { res.status(500).send(`Error: ${err.message}`); }
 };
 
-// === 辅助生成函数 ===
 async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
     if (!userConfig.customAppGroups) userConfig.customAppGroups = [];
     if (!userConfig.customGlobalRules) userConfig.customGlobalRules = [];
@@ -219,9 +165,7 @@ async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
     let config = yaml.load(response.data);
     const allProxyNames = (config.proxies || []).map(p => p.name);
 
-    if (userConfig.dnsSettings && userConfig.dnsSettings.enable) {
-        config.dns = userConfig.dnsSettings;
-    }
+    if (userConfig.dnsSettings && userConfig.dnsSettings.enable) config.dns = userConfig.dnsSettings;
 
     const usedNodeNames = new Set();
     const lbGroupsOutput = [];
@@ -242,17 +186,12 @@ async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
         let targetProxies = [];
         if (DEFAULT_APP_NAMES.includes(groupName)) {
             const selectedRegions = userConfig.appGroups[groupName] || [];
-            const validProxies = selectedRegions.map(r => `${r} 自动负载`).filter(f => lbGroupsOutput.find(g => g.name === f));
-            targetProxies = validProxies.length > 0 ? validProxies : [];
+            targetProxies = selectedRegions.map(r => `${r} 自动负载`).filter(f => lbGroupsOutput.find(g => g.name === f));
         } else {
             const customGroup = userConfig.customAppGroups.find(g => g.name === groupName);
-            if (customGroup) {
-                const selectedRegions = customGroup.targetLBs || [];
-                const validProxies = selectedRegions.map(r => `${r} 自动负载`).filter(f => lbGroupsOutput.find(g => g.name === f));
-                targetProxies = validProxies.length > 0 ? validProxies : [];
-            }
+            if (customGroup) targetProxies = (customGroup.targetLBs || []).map(r => `${r} 自动负载`).filter(f => lbGroupsOutput.find(g => g.name === f));
         }
-        targetProxies.push("ReiaNEXT");
+        if (targetProxies.length === 0) targetProxies = ["ReiaNEXT"]; else targetProxies.push("ReiaNEXT");
         MY_GROUPS.push({ name: groupName, type: "select", proxies: targetProxies });
     });
 
@@ -262,14 +201,11 @@ async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
     config['proxy-groups'] = [...MY_GROUPS, ...lbGroupsOutput];
 
     const injectedRules = [];
-    // 1. 全局自定义规则
     userConfig.customGlobalRules.forEach(r => injectedRules.push(`${r.type},${r.value},${r.target}${r.noResolve ? ',no-resolve' : ''}`));
-    // 2. 策略组自定义规则
     userConfig.customAppGroups.forEach(cg => {
         if (cg.rules) cg.rules.forEach(r => injectedRules.push(`${r.type},${r.value},${cg.name}${r.noResolve ? ',no-resolve' : ''}`));
     });
     config.rules = [...injectedRules, ...(config.rules || [])];
-
     return yaml.dump(config);
 }
 
@@ -289,8 +225,7 @@ function renderAdminPage(config) {
     const customBgCss = ui.backgroundImage ? 
         `body { background: linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.6)), url('${ui.backgroundImage}') no-repeat center center fixed; background-size: cover; }
          .card { background-color: rgba(255, 255, 255, 0.9); }
-         [data-bs-theme="dark"] .card { background-color: rgba(33, 37, 41, 0.95); }` 
-        : '';
+         [data-bs-theme="dark"] .card { background-color: rgba(33, 37, 41, 0.95); }` : '';
 
     return `
 <!DOCTYPE html>
@@ -298,12 +233,12 @@ function renderAdminPage(config) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NextReia Pro V6.5</title>
+    <title>NextReia Pro V6.6</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-yaml.min.js"></script>
     <style>
         :root { --blur-amt: 12px; }
         body { background-color: var(--bs-body-bg); transition: background 0.3s; padding: 20px; min-height: 100vh; padding-top: 60px; }
@@ -321,7 +256,6 @@ function renderAdminPage(config) {
         textarea.form-control { font-family: monospace; font-size: 0.85rem; }
         .list-group-item { cursor: default; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
         .sort-handle { cursor: grab; color: #adb5bd; padding: 5px; font-size: 1.2rem; touch-action: none; }
-        .sort-handle:active { cursor: grabbing; }
         .badge-proxy { background-color: #0d6efd; }
         .badge-browser { background-color: #6c757d; }
         .checkbox-grid { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; width: 100%; }
@@ -363,14 +297,13 @@ function renderAdminPage(config) {
 <div id="login-overlay">
     <div class="login-box">
         <h4 class="mb-4">🔒 管理员验证</h4>
-        <input type="password" id="login_pwd" class="form-control form-control-lg mb-3 text-center" placeholder="请输入密码">
-        <button class="btn btn-primary btn-lg w-100" onclick="doLogin()">进入后台</button>
-        <div class="mt-3"><a href="#" class="text-danger small text-decoration-none" onclick="factoryReset()">忘记密码? 恢复出厂设置</a></div>
+        <input type="password" id="login_pwd" class="form-control form-control-lg mb-3 text-center" placeholder="请输入密码" autofocus>
+        <button id="login_btn" class="btn btn-primary btn-lg w-100" onclick="doLogin()">进入后台</button>
+        <div class="mt-3"><a href="javascript:void(0)" class="text-danger small text-decoration-none" onclick="factoryReset()">忘记密码? 恢复出厂设置</a></div>
         <div id="login-msg" class="text-danger mt-2 small"></div>
     </div>
 </div>
 
-<!-- Rule Modal with Tabs -->
 <div class="modal fade" id="ruleModal" tabindex="-1">
     <div class="modal-dialog modal-xl">
         <div class="modal-content">
@@ -386,21 +319,9 @@ function renderAdminPage(config) {
                         <button class="btn btn-sm btn-outline-success mt-2" onclick="addRuleRow()">+ 新增规则</button>
                     </div>
                     <div class="tab-pane fade" id="edit-batch">
-                        <div class="alert alert-secondary small p-2">
-                            <p class="mb-1 fw-bold">智能导入说明：</p>
-                            <ul class="mb-0">
-                                <li>支持标准格式：<code>类型,内容,目标,no-resolve</code> (分隔符支持空格或逗号)</li>
-                                <li>支持模糊修正：例如自动将 <code>DOMAINSUFFIX</code> 修正为 <code>DOMAIN-SUFFIX</code></li>
-                                <li>自动忽略行首 <code>-</code> 和注释 <code>#</code></li>
-                                <li><strong>策略组模式：</strong>导入时会自动忽略“目标”参数，强制指向当前编辑的策略组。</li>
-                                <li><strong>全局模式：</strong>保留原“目标”，如缺失默认为 DIRECT。</li>
-                            </ul>
-                        </div>
-                        <textarea id="batch-rule-input" class="form-control" rows="10" placeholder="# 示例输入：
-- DOMAIN-SUFFIX,nicovideo.jp,Proxy
-DOMAINSUFFIX niconico.jp Proxy
-DOMAIN-KEYWORD,nicovideo,123 (策略组模式下 123 会被忽略)"></textarea>
-                        <button class="btn btn-sm btn-info mt-2" onclick="batchImport()">开始智能分析并导入</button>
+                        <div class="alert alert-secondary small p-2">格式：<code>类型,内容,目标(可选),no-resolve(可选)</code>，一行一条。</div>
+                        <textarea id="batch-rule-input" class="form-control" rows="10" placeholder="DOMAIN-SUFFIX,google.com,MyGroup"></textarea>
+                        <button class="btn btn-sm btn-info mt-2" onclick="batchImport()">识别并导入</button>
                     </div>
                 </div>
                 <div id="modal-target-section" class="mt-3"><hr><h6>目标负载均衡组</h6><div id="modal-app-choices" class="checkbox-grid"></div></div>
@@ -423,7 +344,7 @@ DOMAIN-KEYWORD,nicovideo,123 (策略组模式下 123 会被忽略)"></textarea>
 
 <div class="container" id="main-app" style="max-width:950px">
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="fw-bold">🛠️ NextReia Pro V6.5</h3>
+        <h3 class="fw-bold">🛠️ NextReia Pro V6.6</h3>
         <div><button class="btn btn-outline-secondary btn-sm me-2" onclick="showChangePwd(false)">修改密码</button><button class="btn btn-danger btn-sm" onclick="doLogout()">退出</button></div>
     </div>
 
@@ -435,7 +356,6 @@ DOMAIN-KEYWORD,nicovideo,123 (策略组模式下 123 会被忽略)"></textarea>
     </ul>
 
     <div class="tab-content">
-        <!-- 配置面板 -->
         <div class="tab-pane fade show active" id="config-pane">
             <div class="card border-primary border-2">
                 <div class="card-body d-flex justify-content-between align-items-center">
@@ -488,7 +408,7 @@ DOMAIN-KEYWORD,nicovideo,123 (策略组模式下 123 会被忽略)"></textarea>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/crypto-js@4.1.1/crypto-js.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
 <script>
@@ -501,15 +421,38 @@ DOMAIN-KEYWORD,nicovideo,123 (策略组模式下 123 会被忽略)"></textarea>
     let currentStatsType = 'ua'; let statsSortKey = 'count'; let statsSortAsc = false;
     let currentStatsData = []; let currentIsOverwrite = true;
 
-    if(authTokenHash) { document.getElementById('login-overlay').style.display = 'none'; document.getElementById('main-app').classList.add('active'); renderUI(); }
+    // 检查 CryptoJS 状态
+    window.onload = function() {
+        if (typeof CryptoJS === 'undefined') {
+            document.getElementById('login-msg').innerHTML = "<b>⚠️ 错误：</b>加密库加载失败，请检查网络或刷新页面。";
+            document.getElementById('login_btn').disabled = true;
+        } else if(authTokenHash) {
+            document.getElementById('login-overlay').style.display = 'none';
+            document.getElementById('main-app').classList.add('active');
+            renderUI();
+        }
+    };
+
     function hash(str) { return CryptoJS.SHA256(str).toString(CryptoJS.enc.Hex); }
 
     async function doLogin() {
-        const pwd = document.getElementById('login_pwd').value; const pwdHash = hash(pwd);
+        const btn = document.getElementById('login_btn');
+        const pwd = document.getElementById('login_pwd').value; 
+        const msg = document.getElementById('login-msg');
+        if(!pwd) return msg.innerText = "请输入密码";
+        
+        btn.disabled = true; btn.innerText = "验证中..."; msg.innerText = "";
+        
         try {
+            const pwdHash = hash(pwd);
             const res = await (await fetch('/?action=login', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ authHash: pwdHash }) })).json();
-            if (res.success) { authTokenHash = pwdHash; sessionStorage.setItem('authHash', pwdHash); document.getElementById('login-overlay').style.display = 'none'; if (res.isDefaultPwd) showChangePwd(true); else { document.getElementById('main-app').classList.add('active'); renderUI(); } } else { alert("密码错误"); }
-        } catch (e) { alert("网络错误"); }
+            if (res.success) {
+                authTokenHash = pwdHash; sessionStorage.setItem('authHash', pwdHash);
+                document.getElementById('login-overlay').style.display = 'none';
+                if (res.isDefaultPwd) showChangePwd(true); else { document.getElementById('main-app').classList.add('active'); renderUI(); }
+            } else { msg.innerText = "密码错误"; }
+        } catch (e) { msg.innerText = "网络请求失败"; }
+        finally { btn.disabled = false; btn.innerText = "进入后台"; }
     }
     document.getElementById('login_pwd').addEventListener('keypress', e => e.key === 'Enter' && doLogin());
     function doLogout() { sessionStorage.removeItem('authHash'); location.reload(); }
@@ -537,6 +480,7 @@ DOMAIN-KEYWORD,nicovideo,123 (策略组模式下 123 会被忽略)"></textarea>
         });
         new Sortable(list, { handle: '.sort-handle', animation: 150, ghostClass: 'ghost-class', onEnd: function (evt) { config.groupOrder = Array.from(list.children).map(li => li.dataset.name); renderAppGroups(); } });
     }
+    
     function addNewCustomGroup() { const name = prompt("新组名称:", "MyGroup"); if (name && !config.groupOrder.includes(name)) { config.groupOrder.splice(1, 0, name); config.customAppGroups.push({ name: name, rules: [], targetLBs: [] }); renderSortableGroups(); renderAppGroups(); } }
     function deleteCustomGroup(name) { if (!confirm(\`确认删除 \${name} ?\`)) return; config.groupOrder = config.groupOrder.filter(n => n !== name); config.customAppGroups = config.customAppGroups.filter(g => g.name !== name); renderSortableGroups(); renderAppGroups(); }
     function updateGroupName(oldName, newName) { if (oldName === newName || DEFAULT_APP_NAMES.includes(oldName)) return; const idx = config.groupOrder.indexOf(oldName); if (idx !== -1) config.groupOrder[idx] = newName; const grp = config.customAppGroups.find(g => g.name === oldName); if (grp) grp.name = newName; renderSortableGroups(); renderAppGroups(); }
@@ -572,54 +516,19 @@ DOMAIN-KEYWORD,nicovideo,123 (策略组模式下 123 会被忽略)"></textarea>
         document.getElementById('rule-list-container').appendChild(div);
     }
     
-    // === 智能批量导入核心逻辑 ===
     function batchImport() {
         const text = document.getElementById('batch-rule-input').value;
         const lines = text.split('\\n'); let count = 0;
         lines.forEach(line => {
-            // 1. 清理：去除首尾空格，去除行首的 '- ' (YAML列表格式)，去除注释
-            let cleanLine = line.trim().replace(/^-/, '').trim().split(/#|\/\//)[0].trim();
-            if (!cleanLine) return; 
-
-            // 2. 分割：支持逗号或空格分隔
-            const parts = cleanLine.split(/[\\s,]+/).filter(Boolean);
-
+            const parts = line.split(',').map(s => s.trim());
             if (parts.length >= 2) {
-                let type = parts[0].toUpperCase();
-                let val = parts[1];
-                let target = '';
-                let noRes = false;
-
-                // 检查 no-resolve
-                if (cleanLine.toLowerCase().includes('no-resolve')) {
-                    noRes = true;
-                    const nrIndex = parts.findIndex(p => p.toLowerCase() === 'no-resolve');
-                    if (nrIndex > -1) parts.splice(nrIndex, 1);
-                }
-
-                // 3. 目标组处理逻辑
-                if (editingMode === 'global') {
-                    // 全局模式：尝试读取第三个参数作为目标，默认 DIRECT
-                    target = parts.length > 2 ? parts[2] : 'DIRECT';
-                } else {
-                    // 策略组模式：强制忽略导入的目标，使用当前组名
-                    target = editingGroupName;
-                }
-
-                // 4. 类型模糊修正
-                if (!ALL_RULE_TYPES.includes(type)) {
-                     if (type === 'DOMAINSUFFIX') type = 'DOMAIN-SUFFIX';
-                     if (type === 'IPCIDR') type = 'IP-CIDR';
-                     if (type === 'DOMAINKEYWORD') type = 'DOMAIN-KEYWORD';
-                }
-
-                if (ALL_RULE_TYPES.includes(type)) {
-                    addRuleRow(type, val, target, noRes);
-                    count++;
-                }
+                const type = parts[0].toUpperCase(); const val = parts[1];
+                const target = parts.length > 2 && !parts[2].includes('no-resolve') ? parts[2] : '';
+                const noRes = line.includes('no-resolve');
+                if (ALL_RULE_TYPES.includes(type)) { addRuleRow(type, val, target, noRes); count++; }
             }
         });
-        alert(\`成功智能解析并导入 \${count} 条规则\`);
+        alert(\`已导入 \${count} 条\`);
         new bootstrap.Tab(document.querySelector('button[data-bs-target="#edit-visual"]')).show();
     }
 
@@ -778,7 +687,7 @@ DOMAIN-KEYWORD,nicovideo,123 (策略组模式下 123 会被忽略)"></textarea>
             // Trigger delayed fetch for IPs
             setTimeout(() => {
                 data.forEach((item, index) => {
-                    if(index > 20) return; // Limit fetches to top 20
+                    if(index > 20) return; // Limit fetches to top 20 to avoid rate limit
                     const rowId = \`ip-row-\${index}\`;
                     const ip = item.label;
                     fetchIpDetails(ip).then(details => {
@@ -838,4 +747,3 @@ DOMAIN-KEYWORD,nicovideo,123 (策略组模式下 123 会被忽略)"></textarea>
 </script>
 </body>
 </html>`;
-}
