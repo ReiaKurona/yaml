@@ -1,6 +1,11 @@
 /**
  * NextReia Clash Subscription Converter & Manager
- * Version: 6.4 (IP Geolocation, ASN, Custom Source)
+ * Version: 6.5 (Smart Batch Import & Fuzzy Parsing)
+ * 
+ * Update Log:
+ * - Added smart parsing logic for batch import.
+ * - Added context-aware target replacement (Group vs Global).
+ * - Improved comments for maintenance.
  */
 
 const yaml = require('js-yaml');
@@ -8,7 +13,7 @@ const axios = require('axios');
 const { kv } = require('@vercel/kv');
 const crypto = require('crypto');
 
-// === 工具函数 ===
+// === 工具函数：SHA-256 哈希计算 ===
 function hashPwd(password) {
     return crypto.createHash('sha256').update(password).digest('hex');
 }
@@ -16,6 +21,7 @@ function hashPwd(password) {
 const DEFAULT_PWD_HASH = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918";
 const DEFAULT_APP_NAMES = ["Sora&ChatGPT", "ABEMA", "赛马娘PrettyDerby", "PJSK-JP", "Claude"];
 
+// Mihomo 支持的所有规则类型 (标准全集)
 const ALL_RULE_TYPES = [
     "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX", "GEOSITE", 
     "IP-CIDR", "IP-CIDR6", "IP-SUFFIX", "IP-ASN", "GEOIP", "SRC-IP-CIDR", 
@@ -28,14 +34,13 @@ const BUILT_IN_POLICIES = ["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBL
 const DEFAULT_CONFIG = {
     passwordHash: DEFAULT_PWD_HASH,
     enableOverwrite: true,
-    // 新增 ipApiSource 和 customIpApiUrl
     uiSettings: { 
         backgroundImage: "",
-        ipApiSource: "ipapi.co", // 默认使用支持 HTTPS 的源
+        ipApiSource: "ipapi.co",
         customIpApiUrl: "" 
     },
     lbGroups: [
-        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰|IEPL" },
+        { name: "🇭🇰 香港", regex: "HK|hong|🇭🇰" },
         { name: "🇯🇵 日本", regex: "JP|japan|🇯🇵" },
         { name: "🇨🇦 加拿大", regex: "CA|canada|🇨🇦" }
     ],
@@ -93,14 +98,17 @@ module.exports = async (req, res) => {
         const currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
         const currentPwdHash = currentConfig.passwordHash || DEFAULT_PWD_HASH;
 
+        // Login
         if (action === 'login') {
             if (authHash === currentPwdHash) return res.json({ success: true, isDefaultPwd: currentPwdHash === DEFAULT_PWD_HASH });
             return res.status(403).json({ success: false, msg: "密码错误" });
         }
+        // Factory Reset
         if (action === 'factoryReset') {
             await kv.flushall();
             return res.json({ success: true, msg: "♻️ 已恢复出厂设置，所有数据已清除" });
         }
+        // Preview
         if (action === 'preview') {
             if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
             try {
@@ -109,6 +117,7 @@ module.exports = async (req, res) => {
             } catch (e) { return res.json({ success: false, msg: "生成预览失败: " + e.message }); }
         }
         
+        // Auth Check
         if (authHash !== currentPwdHash) return res.status(403).json({ success: false, msg: "会话失效" });
 
         if (action === 'saveConfig') {
@@ -164,7 +173,7 @@ module.exports = async (req, res) => {
             dnsSettings: { ...DEFAULT_CONFIG.dnsSettings, ...(savedConfig?.dnsSettings || {}) },
             uiSettings: { ...DEFAULT_CONFIG.uiSettings, ...(savedConfig?.uiSettings || {}) }
         };
-        // 兼容性
+        // 兼容性检查
         if (!currentConfig.customAppGroups) currentConfig.customAppGroups = [];
         if (!currentConfig.customGlobalRules) currentConfig.customGlobalRules = [];
         if (!currentConfig.groupOrder) currentConfig.groupOrder = [...DEFAULT_APP_NAMES];
@@ -174,25 +183,30 @@ module.exports = async (req, res) => {
     }
 
     // D. 订阅生成
-    const savedConfig = await kv.get('global_config');
-    const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
-    
-    const isClash = /clash|mihomo|stash/i.test(ua);
-    if (!isClash || !userConfig.enableOverwrite) {
-        const response = await axios.get(subUrl, { headers: { 'User-Agent': ua }, responseType: 'text', timeout: 10000 });
-        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
-        return res.send(response.data);
-    }
+    try {
+        const savedConfig = await kv.get('global_config');
+        const userConfig = { ...DEFAULT_CONFIG, ...savedConfig };
+        
+        const isClash = /clash|mihomo|stash/i.test(ua);
+        if (!isClash || !userConfig.enableOverwrite) {
+            const response = await axios.get(subUrl, { headers: { 'User-Agent': ua }, responseType: 'text', timeout: 10000 });
+            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+            if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
+            return res.send(response.data);
+        }
 
-    const yamlResult = await generateConfig(subUrl, ua, userConfig, false);
-    
-    const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
-    if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
-    
-    res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
-    res.send(yamlResult);
-}
+        const yamlResult = await generateConfig(subUrl, ua, userConfig, false);
+        
+        const response = await axios.get(subUrl, { headers: { 'User-Agent': 'ClashMeta' }, responseType: 'text', timeout: 10000 });
+        if (response.headers['subscription-userinfo']) res.setHeader('subscription-userinfo', response.headers['subscription-userinfo']);
+        
+        res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
+        res.send(yamlResult);
+
+    } catch (err) {
+        res.status(500).send(`Error: ${err.message}`);
+    }
+};
 
 // === 辅助生成函数 ===
 async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
@@ -248,7 +262,9 @@ async function generateConfig(subUrl, ua, userConfig, forceOverwrite) {
     config['proxy-groups'] = [...MY_GROUPS, ...lbGroupsOutput];
 
     const injectedRules = [];
+    // 1. 全局自定义规则
     userConfig.customGlobalRules.forEach(r => injectedRules.push(`${r.type},${r.value},${r.target}${r.noResolve ? ',no-resolve' : ''}`));
+    // 2. 策略组自定义规则
     userConfig.customAppGroups.forEach(cg => {
         if (cg.rules) cg.rules.forEach(r => injectedRules.push(`${r.type},${r.value},${cg.name}${r.noResolve ? ',no-resolve' : ''}`));
     });
@@ -282,7 +298,7 @@ function renderAdminPage(config) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NextReia Pro V6.4</title>
+    <title>NextReia Pro V6.5</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
@@ -354,6 +370,7 @@ function renderAdminPage(config) {
     </div>
 </div>
 
+<!-- Rule Modal with Tabs -->
 <div class="modal fade" id="ruleModal" tabindex="-1">
     <div class="modal-dialog modal-xl">
         <div class="modal-content">
@@ -369,9 +386,21 @@ function renderAdminPage(config) {
                         <button class="btn btn-sm btn-outline-success mt-2" onclick="addRuleRow()">+ 新增规则</button>
                     </div>
                     <div class="tab-pane fade" id="edit-batch">
-                        <div class="alert alert-secondary small p-2">格式：<code>类型,内容,目标(可选),no-resolve(可选)</code>，一行一条。</div>
-                        <textarea id="batch-rule-input" class="form-control" rows="10" placeholder="DOMAIN-SUFFIX,google.com,MyGroup"></textarea>
-                        <button class="btn btn-sm btn-info mt-2" onclick="batchImport()">识别并导入</button>
+                        <div class="alert alert-secondary small p-2">
+                            <p class="mb-1 fw-bold">智能导入说明：</p>
+                            <ul class="mb-0">
+                                <li>支持标准格式：<code>类型,内容,目标,no-resolve</code> (分隔符支持空格或逗号)</li>
+                                <li>支持模糊修正：例如自动将 <code>DOMAINSUFFIX</code> 修正为 <code>DOMAIN-SUFFIX</code></li>
+                                <li>自动忽略行首 <code>-</code> 和注释 <code>#</code></li>
+                                <li><strong>策略组模式：</strong>导入时会自动忽略“目标”参数，强制指向当前编辑的策略组。</li>
+                                <li><strong>全局模式：</strong>保留原“目标”，如缺失默认为 DIRECT。</li>
+                            </ul>
+                        </div>
+                        <textarea id="batch-rule-input" class="form-control" rows="10" placeholder="# 示例输入：
+- DOMAIN-SUFFIX,nicovideo.jp,Proxy
+DOMAINSUFFIX niconico.jp Proxy
+DOMAIN-KEYWORD,nicovideo,123 (策略组模式下 123 会被忽略)"></textarea>
+                        <button class="btn btn-sm btn-info mt-2" onclick="batchImport()">开始智能分析并导入</button>
                     </div>
                 </div>
                 <div id="modal-target-section" class="mt-3"><hr><h6>目标负载均衡组</h6><div id="modal-app-choices" class="checkbox-grid"></div></div>
@@ -394,7 +423,7 @@ function renderAdminPage(config) {
 
 <div class="container" id="main-app" style="max-width:950px">
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="fw-bold">🛠️ NextReia Pro V6.4</h3>
+        <h3 class="fw-bold">🛠️ NextReia Pro V6.5</h3>
         <div><button class="btn btn-outline-secondary btn-sm me-2" onclick="showChangePwd(false)">修改密码</button><button class="btn btn-danger btn-sm" onclick="doLogout()">退出</button></div>
     </div>
 
@@ -406,6 +435,7 @@ function renderAdminPage(config) {
     </ul>
 
     <div class="tab-content">
+        <!-- 配置面板 -->
         <div class="tab-pane fade show active" id="config-pane">
             <div class="card border-primary border-2">
                 <div class="card-body d-flex justify-content-between align-items-center">
@@ -438,17 +468,9 @@ function renderAdminPage(config) {
         <div class="tab-pane fade" id="ui-pane">
             <div class="card"><div class="card-header">🎨 个性化</div><div class="card-body">
                 <div class="mb-3"><label class="form-label">背景图片 URL</label><input type="text" id="bg_image" class="form-control" placeholder="https://..." value="${ui.backgroundImage}"></div>
-                <hr>
-                <h6 class="mb-3">IP 数据源设置 (用于统计页面)</h6>
-                <div class="mb-3"><label class="form-label">数据源选择</label>
-                    <select id="ip_api_source" class="form-select" onchange="toggleCustomApi()">
-                        <option value="ipapi.co" ${ui.ipApiSource==='ipapi.co'?'selected':''}>ipapi.co (HTTPS, 推荐)</option>
-                        <option value="ip-api.com" ${ui.ipApiSource==='ip-api.com'?'selected':''}>ip-api.com (HTTP, 中文, 需浏览器允许)</option>
-                        <option value="ip.sb" ${ui.ipApiSource==='ip.sb'?'selected':''}>ip.sb (HTTPS, 极简)</option>
-                        <option value="custom" ${ui.ipApiSource==='custom'?'selected':''}>自定义 API</option>
-                    </select>
-                </div>
-                <div class="mb-3" id="custom_api_div" style="display:none"><label class="form-label">自定义 API URL (使用 {ip} 占位)</label><input type="text" id="custom_ip_api" class="form-control" placeholder="https://api.example.com/{ip}" value="${ui.customIpApiUrl}"></div>
+                <hr><h6 class="mb-3">IP 数据源设置</h6>
+                <div class="mb-3"><label class="form-label">数据源选择</label><select id="ip_api_source" class="form-select" onchange="toggleCustomApi()"><option value="ipapi.co" ${ui.ipApiSource==='ipapi.co'?'selected':''}>ipapi.co (HTTPS)</option><option value="ip-api.com" ${ui.ipApiSource==='ip-api.com'?'selected':''}>ip-api.com (HTTP)</option><option value="ip.sb" ${ui.ipApiSource==='ip.sb'?'selected':''}>ip.sb (HTTPS)</option><option value="custom" ${ui.ipApiSource==='custom'?'selected':''}>自定义</option></select></div>
+                <div class="mb-3" id="custom_api_div" style="display:none"><label class="form-label">自定义 API ({ip} 占位)</label><input type="text" id="custom_ip_api" class="form-control" placeholder="https://..." value="${ui.customIpApiUrl}"></div>
                 <button class="btn btn-primary" onclick="save()">保存界面设置</button>
             </div></div>
             <div class="card"><div class="card-header bg-info-subtle">💾 备份与还原</div><div class="card-body"><div class="d-flex gap-2"><button class="btn btn-outline-primary" onclick="exportSettings()">📤 导出</button><button class="btn btn-outline-success" onclick="document.getElementById('file_import').click()">📥 导入</button><input type="file" id="file_import" accept=".json" style="display:none" onchange="importSettings(this)"></div></div></div>
@@ -550,19 +572,54 @@ function renderAdminPage(config) {
         document.getElementById('rule-list-container').appendChild(div);
     }
     
+    // === 智能批量导入核心逻辑 ===
     function batchImport() {
         const text = document.getElementById('batch-rule-input').value;
         const lines = text.split('\\n'); let count = 0;
         lines.forEach(line => {
-            const parts = line.split(',').map(s => s.trim());
+            // 1. 清理：去除首尾空格，去除行首的 '- ' (YAML列表格式)，去除注释
+            let cleanLine = line.trim().replace(/^-/, '').trim().split(/#|\/\//)[0].trim();
+            if (!cleanLine) return; 
+
+            // 2. 分割：支持逗号或空格分隔
+            const parts = cleanLine.split(/[\\s,]+/).filter(Boolean);
+
             if (parts.length >= 2) {
-                const type = parts[0].toUpperCase(); const val = parts[1];
-                const target = parts.length > 2 && !parts[2].includes('no-resolve') ? parts[2] : '';
-                const noRes = line.includes('no-resolve');
-                if (ALL_RULE_TYPES.includes(type)) { addRuleRow(type, val, target, noRes); count++; }
+                let type = parts[0].toUpperCase();
+                let val = parts[1];
+                let target = '';
+                let noRes = false;
+
+                // 检查 no-resolve
+                if (cleanLine.toLowerCase().includes('no-resolve')) {
+                    noRes = true;
+                    const nrIndex = parts.findIndex(p => p.toLowerCase() === 'no-resolve');
+                    if (nrIndex > -1) parts.splice(nrIndex, 1);
+                }
+
+                // 3. 目标组处理逻辑
+                if (editingMode === 'global') {
+                    // 全局模式：尝试读取第三个参数作为目标，默认 DIRECT
+                    target = parts.length > 2 ? parts[2] : 'DIRECT';
+                } else {
+                    // 策略组模式：强制忽略导入的目标，使用当前组名
+                    target = editingGroupName;
+                }
+
+                // 4. 类型模糊修正
+                if (!ALL_RULE_TYPES.includes(type)) {
+                     if (type === 'DOMAINSUFFIX') type = 'DOMAIN-SUFFIX';
+                     if (type === 'IPCIDR') type = 'IP-CIDR';
+                     if (type === 'DOMAINKEYWORD') type = 'DOMAIN-KEYWORD';
+                }
+
+                if (ALL_RULE_TYPES.includes(type)) {
+                    addRuleRow(type, val, target, noRes);
+                    count++;
+                }
             }
         });
-        alert(\`已导入 \${count} 条\`);
+        alert(\`成功智能解析并导入 \${count} 条规则\`);
         new bootstrap.Tab(document.querySelector('button[data-bs-target="#edit-visual"]')).show();
     }
 
@@ -721,7 +778,7 @@ function renderAdminPage(config) {
             // Trigger delayed fetch for IPs
             setTimeout(() => {
                 data.forEach((item, index) => {
-                    if(index > 20) return; // Limit fetches to top 20 to avoid rate limit
+                    if(index > 20) return; // Limit fetches to top 20
                     const rowId = \`ip-row-\${index}\`;
                     const ip = item.label;
                     fetchIpDetails(ip).then(details => {
